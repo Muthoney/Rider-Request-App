@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Rider Requests: run on localhost",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/local.mjs",
+      "args": ["dev"],
+      "runtimeArgs": ["--no-warnings=ExperimentalWarning"],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Provision sample data",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"],
+      "serverReadyAction": {
+        "action": "openExternally",
+        "pattern": "listening on .*:(\\d+)",
+        "uriFormat": "http://127.0.0.1:%s"
+      }
+    },
+    {
+      "name": "Rider Requests: run tests",
+      "type": "node",
+      "request": "launch",
+      "runtimeArgs": ["--no-warnings=ExperimentalWarning", "--test", "tests/server.test.mjs", "tests/whatsapp.test.mjs"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ]
+}

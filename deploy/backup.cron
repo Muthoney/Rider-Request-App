@@ -1,0 +1,2 @@
+# Nightly consistent SQLite backup at 02:17; adapt the container name to yours.
+17 2 * * * docker exec rider-requests node --no-warnings=ExperimentalWarning server/backup.mjs >> /var/log/rider-requests-backup.log 2>&1

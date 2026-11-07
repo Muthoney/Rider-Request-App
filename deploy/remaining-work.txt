@@ -1,0 +1,19 @@
+Launch checklist — remaining work
+=================================
+
+Not connected (UI states this wherever relevant):
+[ ] WhatsApp Business API: outbound notifications and OTP sign-in (import is manual paste today)
+[ ] SMS fallback for notifications
+[ ] Microsoft SSO (Entra ID) sign-in
+[ ] Individual Android background tracking and live rider positions
+[ ] GPS-based handover validation (records carry gps_status = "unconnected")
+[ ] Address search / geocoding and route optimisation (map is illustrative)
+[ ] Email-based password recovery
+[ ] Off-server backup copy + rehearsed restore
+
+Before go-live:
+[ ] Replace example accounts in server/provision.mjs; delete bootstrap-credentials.json after hand-out
+[ ] HTTPS origin configured in APP_ORIGIN; COOKIE_SECURE=true; TRUST_PROXY=1 behind the proxy
+[ ] Nightly backup cron adapted to the real container name (deploy/backup.cron)
+[ ] Reverse-proxy config validated before reload; unrelated sites untouched
+[ ] Confirm Triangle / Finance rider designations with operations

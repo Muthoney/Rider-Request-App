@@ -1,0 +1,32 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Provision sample data",
+      "type": "npm",
+      "script": "provision:sample",
+      "problemMatcher": [],
+      "presentation": { "reveal": "silent", "panel": "shared" }
+    },
+    {
+      "label": "Start dev server",
+      "type": "npm",
+      "script": "dev",
+      "isBackground": true,
+      "dependsOn": "Provision sample data",
+      "problemMatcher": {
+        "owner": "rider-requests",
+        "pattern": { "regexp": "^__never__$" },
+        "background": { "activesBegin": ".", "beginsPattern": ".", "endsPattern": "listening on" }
+      },
+      "group": { "kind": "build", "isDefault": true }
+    },
+    {
+      "label": "Run tests",
+      "type": "npm",
+      "script": "test",
+      "problemMatcher": [],
+      "group": { "kind": "test", "isDefault": true }
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+# Example for a VPS that already runs an HTTPS reverse proxy.
+# Adapt names, network and domain to your environment; do not copy unchanged.
+services:
+  rider-requests:
+    image: rider-requests:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: rider-requests
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      COOKIE_SECURE: "true"
+      TRUST_PROXY: "1"
+    ports:
+      - "127.0.0.1:3000:3000"   # loopback only, for local health checks
+    volumes:
+      - rider-requests-data:/data
+      - rider-requests-backups:/backups
+    networks:
+      - rider-requests-edge
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  rider-requests-data:
+    name: rider-requests-data
+  rider-requests-backups:
+    name: rider-requests-backups
+
+networks:
+  rider-requests-edge:
+    external: true
