@@ -37,7 +37,6 @@ export const HANDLING = {
   confidential: { label: 'Confidential', icon: 'lock' },
   signature: { label: 'Signature needed', icon: 'pen' },
   cash: { label: 'Cash / valuables', icon: 'coins' },
-  cold: { label: 'Keep cold', icon: 'snow' },
   documents: { label: 'Documents', icon: 'doc' },
   heavy: { label: 'Heavy / bulky', icon: 'weight' },
 };

@@ -1,108 +1,114 @@
 import { api } from '../api.js';
-import { html, ic, avatar, openModal, toast, confirmDialog, tagBadges, toLocalInput, fromLocalInput } from '../ui.js';
+import { html, ic, avatar, tagBadges, fmtTime, fmtDateTime, empty, busy } from '../ui.js';
+import { setShift } from './actions.js';
+import { onTracker } from '../tracker.js';
 
-const startOfWeek = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); const day = (x.getDay() + 6) % 7; x.setDate(x.getDate() - day); return x; };
-const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
-const hm = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const STAFF = ['admin', 'manager', 'dispatcher'];
+const dur = (ms) => { const m = Math.max(0, Math.round(ms / 60e3)); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`; };
 
 export async function render(el, ctx) {
-  const staff = ['admin', 'manager', 'dispatcher'].includes(ctx.user.role);
-  let week = startOfWeek(new Date());
+  const staff = STAFF.includes(ctx.user.role);
   let riders = [];
-  if (staff) riders = (await api.get('/api/stats')).riders;
-  else riders = [{ id: ctx.user.id, name: ctx.user.name, tags: ctx.user.tags }];
-  let shifts = [];
+  let log = [];
+  let me = { ...ctx.user };
+  let trackerOff = () => {};
+  ctx.onCleanup(() => trackerOff());
+
   const load = async () => {
-    ({ shifts } = await api.get(`/api/shifts?from=${encodeURIComponent(week.toISOString())}&to=${encodeURIComponent(addDays(week, 7).toISOString())}`));
+    const from = new Date(Date.now() - 7 * 864e5).toISOString();
+    const [shifts, stats] = await Promise.all([
+      api.get(`/api/shifts?from=${encodeURIComponent(from)}&to=${encodeURIComponent(new Date(Date.now() + 864e5).toISOString())}`),
+      staff ? api.get('/api/stats') : Promise.resolve(null),
+    ]);
+    log = shifts.shifts.slice().sort((a, b) => b.startsAt.localeCompare(a.startsAt));
+    riders = staff ? stats.riders : [{ id: me.id, name: me.name, tags: me.tags, onShift: !!me.onShift, onShiftSince: me.onShiftSince }];
   };
   await load();
 
-  const paint = () => {
-    const days = [...Array(7)].map((_, i) => addDays(week, i));
-    const today = new Date().toDateString();
-    const now = Date.now();
-    const total = shifts.reduce((s, x) => s + (new Date(x.endsAt) - new Date(x.startsAt)) / 3600e3, 0);
-    el.innerHTML = String(html`
-      <div class="page-head">
-        <div><h1>${staff ? 'Shifts' : 'My shifts'}</h1><p>${staff ? 'Plan who is on the road. The dispatch board shows who is on shift right now.' : 'Your scheduled hours this week.'}</p></div>
-        <div class="row wrap">
-          <button class="icon-btn" id="prev" aria-label="Previous week">${ic('chevronLeft')}</button>
-          <b style="min-width:190px;text-align:center">${days[0].toLocaleDateString([], { day: 'numeric', month: 'short' })} – ${days[6].toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' })}</b>
-          <button class="icon-btn" id="next" aria-label="Next week">${ic('chevronRight')}</button>
-          <button class="btn sm" id="today">This week</button>
-          ${staff ? html`<button class="btn primary" id="add">${ic('plus', 'sm')} Add shift</button>` : ''}
-        </div>
-      </div>
-      <div class="stats" style="grid-template-columns:repeat(3,minmax(0,1fr))">
-        <div class="card stat"><div class="k"><span class="dot s-assigned">${ic('calendar', 'sm')}</span>Shifts this week</div><div class="v">${shifts.length}</div></div>
-        <div class="card stat"><div class="k"><span class="dot s-collected">${ic('clock', 'sm')}</span>Scheduled hours</div><div class="v">${Math.round(total)}<small>h</small></div></div>
-        <div class="card stat"><div class="k"><span class="dot s-delivered">${ic('bike', 'sm')}</span>On shift now</div><div class="v">${new Set(shifts.filter((s) => new Date(s.startsAt) <= now && new Date(s.endsAt) > now).map((s) => s.rider.id)).size}</div></div>
-      </div>
-      <div class="card" style="overflow-x:auto">
-        <div class="week">
-          <div class="h">Rider</div>
-          ${days.map((d) => html`<div class="h ${d.toDateString() === today ? 'today' : ''}">${d.toLocaleDateString([], { weekday: 'short' })}<b>${d.getDate()}</b></div>`)}
-          ${riders.map((rd) => html`
-            <div class="who">${avatar(rd.name, 'sm')}<div class="grow"><b style="font-size:13px">${rd.name}</b><div class="row" style="gap:4px;margin-top:2px">${tagBadges(rd.tags)}</div></div></div>
-            ${days.map((d) => {
-              const ds = shifts.filter((s) => s.rider.id === rd.id && new Date(s.startsAt).toDateString() === d.toDateString());
-              return html`<div class="cell ${d.toDateString() === today ? 'today' : ''}">
-                ${ds.map((s) => html`<div class="shift ${new Date(s.startsAt) <= now && new Date(s.endsAt) > now ? 'now' : ''}" title="${s.note || ''}">
-                  <span>${hm(s.startsAt)}–${hm(s.endsAt)}</span>
-                  ${staff ? html`<button data-del="${s.id}" aria-label="Remove shift">${ic('x', 'sm')}</button>` : ''}</div>`)}
-                ${staff ? html`<button class="add" data-add="${rd.id}" data-day="${d.toISOString()}" aria-label="Add shift for ${rd.name} on ${d.toLocaleDateString()}">${ic('plus', 'sm')}</button>` : ''}
-              </div>`;
-            })}`)}
-        </div>
-      </div>`);
-    el.querySelector('#prev').addEventListener('click', async () => { week = addDays(week, -7); await load(); paint(); });
-    el.querySelector('#next').addEventListener('click', async () => { week = addDays(week, 7); await load(); paint(); });
-    el.querySelector('#today').addEventListener('click', async () => { week = startOfWeek(new Date()); await load(); paint(); });
-    el.querySelector('#add')?.addEventListener('click', () => addShift());
-    el.querySelectorAll('[data-add]').forEach((b) => b.addEventListener('click', () => addShift(+b.dataset.add, new Date(b.dataset.day))));
-    el.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
-      if (!(await confirmDialog({ title: 'Remove shift?', message: 'The rider will no longer show as on shift for this time.', confirm: 'Remove', danger: true }))) return;
-      try { await api.del(`/api/shifts/${b.dataset.del}`); toast('Shift removed'); await load(); paint(); } catch (e) { toast(e.message, 'err'); }
-    }));
+  const todayMs = (rd) => {
+    const start = new Date(); start.setHours(0, 0, 0, 0);
+    const t0 = start.getTime(), t1 = Date.now();
+    let ms = log.filter((s) => s.rider.id === rd.id).reduce((sum, s) => sum + Math.max(0, Math.min(+new Date(s.endsAt), t1) - Math.max(+new Date(s.startsAt), t0)), 0);
+    if (rd.onShift && rd.onShiftSince) ms += t1 - Math.max(+new Date(rd.onShiftSince), t0);
+    return ms;
   };
 
-  async function addShift(riderId, day) {
-    const base = day ? new Date(day) : new Date();
-    const start = new Date(base); start.setHours(8, 0, 0, 0);
-    const end = new Date(base); end.setHours(17, 0, 0, 0);
-    const res = await openModal({
-      title: 'Add shift', subtitle: 'Riders on shift are highlighted on the dispatch board.', iconName: 'calendar',
-      body: html`
-        <div class="field"><label for="sr">Rider</label><select class="input" id="sr" name="riderId">${riders.map((r) => html`<option value="${r.id}" ${r.id === riderId ? 'selected' : ''}>${r.name}</option>`)}</select></div>
-        <div class="form-grid">
-          <div class="field"><label for="ss">Starts</label><input class="input" id="ss" type="datetime-local" name="startsAt" value="${toLocalInput(start.toISOString())}" required></div>
-          <div class="field"><label for="se">Ends</label><input class="input" id="se" type="datetime-local" name="endsAt" value="${toLocalInput(end.toISOString())}" required></div>
+  const toggle = (rd, big = false) => html`
+    <button class="shift-toggle ${rd.onShift ? 'on' : ''} ${big ? 'big' : ''}" data-toggle="${rd.id}" aria-pressed="${rd.onShift ? 'true' : 'false'}"
+      aria-label="${rd.name}: ${rd.onShift ? 'on shift, switch off' : 'off shift, switch on'}">
+      <span class="knob">${ic('power', 'sm')}</span><span class="txt">${rd.onShift ? 'On shift' : 'Off shift'}</span>
+    </button>`;
+
+  const card = (rd) => html`
+    <section class="card rider-shift ${rd.onShift ? 'is-on' : ''}">
+      <div class="row" style="gap:12px">
+        ${avatar(rd.name)}
+        <div class="grow"><b>${rd.name}</b>
+          <div class="req-sub"><span class="${rd.onShift ? 'onshift' : 'offshift'}"></span>${rd.onShift ? `Since ${fmtTime(rd.onShiftSince)} · ${dur(Date.now() - new Date(rd.onShiftSince))}` : 'Not on shift'}</div>
+          <div class="row" style="gap:4px;margin-top:4px">${tagBadges(rd.tags)}</div>
         </div>
-        <div class="seg" aria-label="Presets">
-          <button type="button" data-p="7-15">Early 07–15</button><button type="button" data-p="8-17">Day 08–17</button><button type="button" data-p="12-20">Late 12–20</button>
+      </div>
+      <div class="row between" style="margin-top:14px">
+        <span class="muted" style="font-size:12.5px">Today: <b>${dur(todayMs(rd))}</b>${rd.openJobs != null ? ` · ${rd.openJobs} open job${rd.openJobs === 1 ? '' : 's'}` : ''}</span>
+        ${toggle(rd)}
+      </div>
+    </section>`;
+
+  const logTable = () => log.length ? html`<div class="table-wrap"><table class="table"><thead><tr>${staff ? html`<th>Rider</th>` : ''}<th>Started</th><th>Ended</th><th>Length</th></tr></thead><tbody>
+    ${log.slice(0, 50).map((s) => html`<tr>${staff ? html`<td>${s.rider.name}</td>` : ''}<td class="nowrap">${fmtDateTime(s.startsAt)}</td><td class="nowrap">${fmtDateTime(s.endsAt)}</td><td class="nowrap muted">${dur(new Date(s.endsAt) - new Date(s.startsAt))}</td></tr>`)}
+    </tbody></table></div>` : html`<div class="card-body muted">No completed shifts in the last 7 days.</div>`;
+
+  const paint = () => {
+    const on = riders.filter((r) => r.onShift);
+    const totalToday = riders.reduce((s, r) => s + todayMs(r), 0);
+    if (staff) {
+      el.innerHTML = String(html`
+        <div class="page-head">
+          <div><h1>Shifts</h1><p>Switch riders on and off shift. Riders on shift show on the dispatch board and share their live GPS position.</p></div>
+          <div class="row wrap"><a class="btn" href="#/live">${ic('gps', 'sm')} Live map</a></div>
         </div>
-        <div class="field"><label for="sn">Note <span class="muted">(optional)</span></label><input class="input" id="sn" name="note" maxlength="200" placeholder="e.g. Covering Westlands"></div>
-        <p class="error-text" id="serr" hidden></p>`,
-      actions: html`<button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">${ic('check', 'sm')} Save shift</button>`,
-      onMount: ({ form, close }) => {
-        form.querySelectorAll('[data-p]').forEach((b) => b.addEventListener('click', () => {
-          const [a, z] = b.dataset.p.split('-').map(Number);
-          const d = new Date(form.startsAt.value || base);
-          const s = new Date(d); s.setHours(a, 0, 0, 0);
-          const e = new Date(d); e.setHours(z, 0, 0, 0);
-          form.startsAt.value = toLocalInput(s.toISOString()); form.endsAt.value = toLocalInput(e.toISOString());
-        }));
-        form.addEventListener('submit', async (e) => {
-          e.preventDefault();
-          const err = form.querySelector('#serr');
-          try {
-            await api.post('/api/shifts', { riderId: +form.riderId.value, startsAt: fromLocalInput(form.startsAt.value), endsAt: fromLocalInput(form.endsAt.value), note: form.note.value.trim() || null });
-            close(true);
-          } catch (ex) { err.textContent = ex.message; err.hidden = false; }
-        });
-      },
-    });
-    if (res) { toast('Shift added'); await load(); paint(); }
-  }
+        <div class="stats" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+          <div class="card stat"><div class="k"><span class="dot s-delivered">${ic('power', 'sm')}</span>On shift now</div><div class="v">${on.length}<small>of ${riders.length}</small></div></div>
+          <div class="card stat"><div class="k"><span class="dot s-pending">${ic('bike', 'sm')}</span>Off shift</div><div class="v">${riders.length - on.length}</div></div>
+          <div class="card stat"><div class="k"><span class="dot s-collected">${ic('clock', 'sm')}</span>Rider hours today</div><div class="v">${(totalToday / 3600e3).toFixed(1)}<small>h</small></div></div>
+        </div>
+        ${riders.length ? html`<div class="shift-grid">${riders.map(card)}</div>` : html`<div class="card">${empty('bike', 'No riders yet', 'Add rider accounts under Manage accounts.')}</div>`}
+        <section class="card" style="margin-top:20px">
+          <div class="card-head"><div><h2>Shift log</h2><p>Completed shifts in the last 7 days</p></div></div>
+          ${logTable()}
+        </section>`);
+    } else {
+      const rd = riders[0];
+      el.innerHTML = String(html`
+        <div class="page-head"><div><h1>My shift</h1><p>Switch on when you start work. While you're on shift, dispatch can see your live location.</p></div></div>
+        <section class="card shift-hero ${rd.onShift ? 'is-on' : ''}">
+          <div class="stack" style="align-items:center;text-align:center">
+            ${toggle(rd, true)}
+            <div><h2>${rd.onShift ? 'You are on shift' : 'You are off shift'}</h2>
+              <p class="muted">${rd.onShift ? `Since ${fmtTime(rd.onShiftSince)} · ${dur(Date.now() - new Date(rd.onShiftSince))}` : 'Dispatch will not assign you new work until you switch on.'}</p></div>
+            <div class="loc-status" id="loc"></div>
+            <span class="muted" style="font-size:13px">Worked today: <b>${dur(todayMs(rd))}</b></span>
+          </div>
+        </section>
+        <section class="card" style="margin-top:20px">
+          <div class="card-head"><div><h2>My recent shifts</h2><p>Last 7 days</p></div></div>
+          ${logTable()}
+        </section>`);
+      trackerOff();
+      trackerOff = onTracker((t) => {
+        const box = el.querySelector('#loc');
+        if (box) box.innerHTML = String(html`<span class="loc ${t.status}">${ic(t.status === 'live' ? 'gps' : 'gpsOff', 'sm')}${t.message}</span>`);
+      });
+    }
+    el.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', () => busy(b, async () => {
+      const rd = riders.find((r) => r.id === +b.dataset.toggle);
+      const res = await setShift(ctx, rd, !rd.onShift);
+      if (!res) return;
+      if (rd.id === me.id) me = { ...me, onShift: res.onShift, onShiftSince: res.onShiftSince };
+      await load();
+      if (ctx.isCurrent()) paint();
+    })));
+  };
   paint();
+  ctx.poll(async () => { try { await load(); paint(); } catch {} }, 30000);
 }

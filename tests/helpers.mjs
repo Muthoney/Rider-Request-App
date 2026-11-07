@@ -9,10 +9,10 @@ export const ORIGIN = 'https://riders.test';
 export const PASSWORD = 'correct-horse-battery-1';
 const dist = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), 'dist');
 
-export async function startServer({ now } = {}) {
+export async function startServer({ now, integrations } = {}) {
   const db = openDb(':memory:');
   const clock = { offset: 0 };
-  const handler = createApp({ db, origin: ORIGIN, cookieSecure: true, distDir: dist, now: now || (() => Date.now() + clock.offset) });
+  const handler = createApp({ db, origin: ORIGIN, cookieSecure: true, distDir: dist, now: now || (() => Date.now() + clock.offset), integrations });
   const server = http.createServer(handler);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -21,14 +21,14 @@ export async function startServer({ now } = {}) {
     db.prepare('INSERT OR IGNORE INTO companies (name, created_at) VALUES (?, ?)').run(name, new Date().toISOString());
     return db.prepare('SELECT id FROM companies WHERE name = ?').get(name).id;
   };
-  const user = (email, role, { companyName = 'Alpha', tags = [], mustChange = false, password = PASSWORD, tempExpiresAt = null } = {}) => {
-    const r = db.prepare(`INSERT INTO users (company_id, email, name, role, tags, password_hash, must_change, temp_expires_at, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?)`).run(company(companyName), email, email.split('@')[0].replace(/\./g, ' '), role, JSON.stringify(tags),
+  const user = (email, role, { companyName = 'Alpha', tags = [], mustChange = false, password = PASSWORD, tempExpiresAt = null, phone = null } = {}) => {
+    const r = db.prepare(`INSERT INTO users (company_id, email, name, phone, role, tags, password_hash, must_change, temp_expires_at, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(company(companyName), email, email.split('@')[0].replace(/\./g, ' '), phone, role, JSON.stringify(tags),
       hashPassword(password), mustChange ? 1 : 0, tempExpiresAt, new Date().toISOString());
     ids[email] = Number(r.lastInsertRowid);
     return ids[email];
   };
-  return { db, base, ids, user, clock, close: () => new Promise((r) => server.close(r)) };
+  return { db, base, ids, user, clock, idle: () => handler.idle(), close: () => new Promise((r) => server.close(r)) };
 }
 
 /** A tiny cookie-keeping client that behaves like the browser adapter. */

@@ -1,7 +1,9 @@
 import { api } from '../api.js';
 import { html, ic, raw, CATEGORY, HANDLING, toast, busy, toLocalInput, fromLocalInput, esc } from '../ui.js';
 import { parseWhatsApp, parsePin } from '../whatsapp.js';
-import { renderMap } from '../map.js';
+import { renderMap, placePoints } from '../map.js';
+import { isInKenya } from '../kenya.js';
+import { quote, routeKm, estimateMinutes, kes } from '../fuel.js';
 
 const SAMPLE = `[07/11/2026, 09:14] Joy (Studio): Hi dispatch 👋
 Item: Campaign proofs for Triangle sign-off
@@ -33,16 +35,23 @@ export async function render(el, ctx) {
   if (!existing) {
     state.pickup.address = '';
   }
+  let fuelSettings = null;
+  api.get('/api/fuel/settings').then((r) => { fuelSettings = r.settings; refreshSummary(); }).catch(() => {});
   let schedule = !!state.scheduledAt;
   let parsed = null;
   const showImport = ctx.query.get('import') === '1';
 
+  const PIN_HINT = 'Kenya only. Without a pin, the map uses the landmark or street named in the address.';
   const pinField = (prefix, stop, i) => html`
     <div class="field">
       <label for="${prefix}-pin">Map pin <span class="muted" style="font-weight:500">(optional)</span></label>
-      <div class="input-icon">${ic('pin', 'sm')}<input class="input" id="${prefix}-pin" data-pin="${i}" placeholder="Paste a Google Maps link or “-1.28, 36.82”"
-        value="${stop.lat != null ? `${stop.lat}, ${stop.lng}` : ''}"></div>
-      <span class="hint" data-pin-status="${i}">${stop.lat != null ? html`<span class="coord-ok">${ic('check', 'sm')} Pin placed</span>` : 'Used for the illustrative map only.'}</span>
+      <div class="row" style="gap:8px">
+        <div class="input-icon grow">${ic('pin', 'sm')}<input class="input" id="${prefix}-pin" data-pin="${i}" placeholder="Paste a Google Maps link or “-1.28, 36.82”"
+          value="${stop.lat != null ? `${stop.lat}, ${stop.lng}` : ''}"></div>
+        <button type="button" class="btn" data-find="${i}" title="Find the address in Kenya">${ic('search', 'sm')} Find in Kenya</button>
+      </div>
+      <div class="place-results" data-results="${i}" hidden></div>
+      <span class="hint" data-pin-status="${i}">${stop.lat != null ? html`<span class="coord-ok">${ic('check', 'sm')} Pin placed</span>` : PIN_HINT}</span>
     </div>`;
 
   const dropoffHtml = (d, i, n) => html`
@@ -87,6 +96,12 @@ export async function render(el, ctx) {
       { label: 'P', kind: 'pickup', address: state.pickup.address, lat: state.pickup.lat, lng: state.pickup.lng },
       ...state.dropoffs.map((d, i) => ({ label: String(i + 1), kind: 'drop', address: d.address, lat: d.lat, lng: d.lng })),
     ].filter((p) => p.address || p.lat != null);
+    const placed = placePoints(pts).filter((p) => !p.unplaced);
+    let est = null;
+    if (fuelSettings && placed.length >= 2) {
+      const km = routeKm(placed, fuelSettings.roadFactor);
+      est = quote({ km, minutes: estimateMinutes(km, state.dropoffs.length + 1) }, fuelSettings);
+    }
     return html`
       <div class="card-head"><h3>Summary</h3>${state.priority === 'urgent' ? html`<span class="badge p-urgent">${ic('flag')}Urgent</span>` : ''}</div>
       <div class="card-body stack">
@@ -96,6 +111,7 @@ export async function render(el, ctx) {
           <dt>Pickup</dt><dd>${state.scheduledAt ? new Date(state.scheduledAt).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'As soon as possible'}</dd>
           <dt>Stops</dt><dd>1 pickup · ${state.dropoffs.length} drop-off${state.dropoffs.length > 1 ? 's' : ''}</dd>
           <dt>Handling</dt><dd>${state.handling.length ? state.handling.map((h) => HANDLING[h].label).join(', ') : 'Standard'}</dd>
+          <dt>Quote</dt><dd>${est ? html`<b>${kes(est.total)}</b> <span class="muted">≈ ${est.km} km · ${est.minutes} min · ${est.litres} L fuel</span>` : html`<span class="muted">Add Kenyan addresses or pins to estimate</span>`}</dd>
         </dl>
         ${state.category !== 'general' ? html`<div class="alert info">${ic(CATEGORY[state.category].icon, 'sm')}<span>${CATEGORY[state.category].label} work is reserved for designated riders. Dispatch must record a reason to substitute.</span></div>` : ''}
       </div>`;
@@ -193,7 +209,7 @@ export async function render(el, ctx) {
             <textarea class="input" id="wa-text" rows="${showImport ? 9 : 5}" placeholder="Paste the WhatsApp message here…" aria-label="WhatsApp message"></textarea>
             <div class="row"><button type="button" class="btn sm" id="wa-parse">${ic('wand', 'sm')} Read message</button><button type="button" class="btn sm ghost" id="wa-sample">Try an example</button></div>
             <div id="wa-out">${importPreview()}</div>
-            <p class="faint" style="font-size:12px">Manual import only — WhatsApp Business isn’t connected. Nothing is sent to WhatsApp.</p>
+            <p class="faint" style="font-size:12px">Paste-in import only: reading a message here sends nothing to WhatsApp.</p>
           </div>
         </section>
         <section class="card" id="summary">${summary()}</section>
@@ -225,9 +241,12 @@ export async function render(el, ctx) {
       const stop = key === 'p' ? state.pickup : state.dropoffs[+key];
       const status = el.querySelector(`[data-pin-status="${key}"]`);
       const v = inp.value.trim();
-      if (!v) { stop.lat = stop.lng = null; status.textContent = 'Used for the illustrative map only.'; refreshSummary(); return; }
+      if (!v) { stop.lat = stop.lng = null; status.textContent = PIN_HINT; refreshSummary(); return; }
       const pin = parsePin(v);
-      if (pin && pin.lat != null) {
+      if (pin && pin.lat != null && !isInKenya(pin.lat, pin.lng)) {
+        stop.lat = stop.lng = null;
+        status.innerHTML = `<span class="error-text">${esc('That pin is outside Kenya. Use a location in Kenya.')}</span>`;
+      } else if (pin && pin.lat != null) {
         stop.lat = pin.lat; stop.lng = pin.lng;
         status.innerHTML = String(html`<span class="coord-ok">${ic('check', 'sm')} Pin placed at ${pin.lat.toFixed(4)}, ${pin.lng.toFixed(4)}</span>`);
       } else {
@@ -236,6 +255,7 @@ export async function render(el, ctx) {
       }
       refreshSummary();
     }));
+    el.querySelectorAll('[data-find]').forEach((b) => b.addEventListener('click', () => findPlace(b.dataset.find, b)));
     el.querySelector('#add-drop').addEventListener('click', () => {
       readDom(); state.dropoffs.push(blankStop()); paint();
       el.querySelector(`#d${state.dropoffs.length - 1}-address`)?.focus();
@@ -262,6 +282,32 @@ export async function render(el, ctx) {
     el.querySelector('#wa-apply')?.addEventListener('click', applyImport);
 
     f.addEventListener('submit', submit);
+  }
+
+  async function findPlace(key, btn) {
+    readDom();
+    const stop = key === 'p' ? state.pickup : state.dropoffs[+key];
+    const box = el.querySelector(`[data-results="${key}"]`);
+    const q = stop.address.trim();
+    if (q.length < 2) { toast('Type the address first, e.g. “Yaya Centre, Argwings Kodhek Rd”.', 'warn'); return; }
+    await busy(btn, async () => {
+      try {
+        const { results, source } = await api.get(`/api/geocode?q=${encodeURIComponent(q)}`);
+        box.hidden = false;
+        box.innerHTML = String(results.length ? html`
+          ${results.map((r, n) => html`<button type="button" class="place" data-n="${n}">${ic('pin', 'sm')}<span class="grow"><b>${r.label}</b><small>${r.address}</small></span>${r.approximate ? html`<span class="badge b-outline">≈ area</span>` : ''}</button>`)}
+          <small class="faint">${source === 'google' ? 'Results from Google Maps, limited to Kenya' : 'Kenyan landmarks, streets and areas (approximate)'}</small>`
+          : html`<p class="muted" style="font-size:13px">Nothing found in Kenya for “${q}”. Try a landmark, building, street or area name.</p>`);
+        box.querySelectorAll('[data-n]').forEach((x) => x.addEventListener('click', () => {
+          const r = results[+x.dataset.n];
+          stop.lat = r.lat; stop.lng = r.lng;
+          el.querySelector(`[data-pin="${key}"]`).value = `${r.lat.toFixed(6)}, ${r.lng.toFixed(6)}`;
+          el.querySelector(`[data-pin-status="${key}"]`).innerHTML = String(html`<span class="coord-ok">${ic('check', 'sm')} Pinned to ${r.address}${r.approximate ? ' (approximate)' : ''}</span>`);
+          box.hidden = true;
+          refreshSummary();
+        }));
+      } catch (err) { toast(err.message, 'err'); }
+    });
   }
 
   function applyImport() {

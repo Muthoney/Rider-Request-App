@@ -3,7 +3,9 @@ import {
   html, ic, raw, statusBadge, categoryBadge, urgentBadge, avatar, timeAgo, fmtDateTime, fmtTime, HANDLING, CATEGORY,
   openModal, toast, busy, telHref, mapsHref,
 } from '../ui.js';
-import { renderMap, requestPoints } from '../map.js';
+import { mountRouteMap, requestPoints } from '../map.js';
+import { breakdown } from './fuel.js';
+import { kes } from '../fuel.js';
 import { activityIcon } from './activity.js';
 import { assign, pickRiderDialog, handleError } from './actions.js';
 
@@ -98,6 +100,14 @@ export async function render(el, ctx) {
   const id = ctx.params.id;
   const staff = STAFF.includes(ctx.user.role);
   let data = await api.get(`/api/requests/${id}`);
+  let track = { rider: null, path: [] };
+  const inProgress = () => ['assigned', 'collected'].includes(data.request.status);
+  const loadTrack = async () => { track = inProgress() || isStaffish ? await api.get(`/api/requests/${id}/track`).catch(() => track) : track; };
+  const isStaffish = STAFF.includes(ctx.user.role);
+  await loadTrack();
+  // The map lives outside the repainted HTML so Google Maps is created once per visit.
+  const mapHost = document.createElement('div');
+  let mapCtl = null;
   let riders = [];
   if (staff) {
     try { riders = (await api.get('/api/stats')).riders; } catch {}
@@ -207,7 +217,11 @@ export async function render(el, ctx) {
             : html`<div class="row"><span class="avatar lg" style="background:var(--surface-3);color:var(--muted)">${ic('bike')}</span><div><b>No rider yet</b><div class="muted" style="font-size:13px">${CATEGORY[r.category].label === 'General' ? 'Any available rider' : `${CATEGORY[r.category].label}-designated rider required`}</div></div></div>`}
           </div>
         </section>
-        <section>${raw(renderMap(requestPoints(r), { width: 400, height: 280 }))}</section>
+        <section id="route-map"></section>
+        ${track.rider ? html`<p class="muted" style="font-size:12.5px;margin-top:-8px">${ic('gps', 'sm')} ${r.rider?.name} · GPS ${timeAgo(track.rider.recordedAt)}${track.rider.speed != null ? ` · ${Math.round(track.rider.speed)} km/h` : ''}</p>`
+          : inProgress() ? html`<p class="faint" style="font-size:12.5px;margin-top:-8px">${ic('gpsOff', 'sm')} No live position — the rider shares GPS only while on shift with the app open.</p>` : ''}
+        ${fuelCard(data.fuel, r)}
+        ${staff ? notificationsCard(data.notifications, r) : ''}
         ${overrides.length ? html`
         <section class="card">
           <div class="card-head"><h3>${ic('shield', 'sm')} Recorded overrides</h3></div>
@@ -224,10 +238,52 @@ export async function render(el, ctx) {
         </section>
       </aside>
     </div>`);
+    el.querySelector('#route-map').append(mapHost);
     wire(r);
   };
 
-  const reload = async () => { data = await api.get(`/api/requests/${id}`); if (ctx.isCurrent()) paint(); };
+  function fuelCard(fuel, r) {
+    if (!fuel) return '';
+    const q = fuel.actual || fuel.estimate;
+    return html`<section class="card">
+      <div class="card-head"><h3>${ic('fuel', 'sm')} ${fuel.actual ? 'Trip cost' : 'Quote estimate'}</h3>
+        <span class="badge ${q.source === 'gps' ? 's-delivered' : 'b-outline'}">${q.source === 'gps' ? 'GPS distance' : 'Estimated'}</span></div>
+      <div class="card-body stack-sm">
+        ${breakdown(q, fuel.settings)}
+        ${fuel.actual ? html`<p class="faint" style="font-size:12px">Quoted before the trip: ${kes(fuel.estimate.total)} for ≈${fuel.estimate.km} km.</p>` : ''}
+        ${fuel.estimate.placedStops < fuel.estimate.totalStops ? html`<p class="faint" style="font-size:12px">${fuel.estimate.totalStops - fuel.estimate.placedStops} stop(s) couldn't be placed in Kenya, so the distance is incomplete. Add pins to improve it.</p>` : ''}
+        ${staff ? html`<a class="btn sm ghost" href="#/fuel">${ic('calc', 'sm')} Fuel &amp; quotes</a>` : ''}
+      </div></section>`;
+  }
+
+  function notificationsCard(list, r) {
+    const LABEL = { sent: 'Sent', delivered: 'Delivered', read: 'Read', failed: 'Failed', skipped: 'Not sent' };
+    const TONE = { sent: 's-assigned', delivered: 's-delivered', read: 's-delivered', failed: 's-failed', skipped: 's-pending' };
+    const canResend = r.rider && ['assigned', 'collected'].includes(r.status);
+    return html`<section class="card">
+      <div class="card-head"><h3>${ic('message', 'sm')} Rider notifications</h3>
+        ${canResend ? html`<button class="btn sm ghost" data-act="notify" data-busy=" Sending…">${ic('send', 'sm')} Resend</button>` : ''}</div>
+      ${list.length ? html`<div class="list">${list.map((n) => html`
+        <div class="list-item"><span class="avatar sm" style="background:${n.channel === 'whatsapp' ? '#25d366' : 'var(--surface-3)'};color:${n.channel === 'whatsapp' ? '#fff' : 'var(--muted)'}">${ic(n.channel === 'sms' ? 'phone' : 'message', 'sm')}</span>
+          <div class="grow"><b>${n.channel === 'whatsapp' ? 'WhatsApp' : n.channel === 'sms' ? 'SMS' : 'No message'}</b> <span class="muted">to ${n.rider}${n.recipient ? ` · ${n.recipient}` : ''}</span>
+            ${n.error ? html`<div class="req-sub error-text">${n.error}</div>` : ''}<div class="req-sub">${fmtDateTime(n.createdAt)}</div></div>
+          <span class="badge ${TONE[n.status]}">${LABEL[n.status]}</span></div>`)}</div>`
+        : html`<div class="card-body muted" style="font-size:13px">The rider gets a WhatsApp message (or an SMS if WhatsApp fails) as soon as they're assigned.</div>`}
+    </section>`;
+  }
+
+  async function drawMap() {
+    const r = data.request;
+    const live = { rider: track.rider, path: track.path };
+    if (!mapCtl) mapCtl = await mountRouteMap(mapHost, requestPoints(r), { width: 400, height: 280, ...live });
+    else mapCtl.update(requestPoints(r), live);
+  }
+
+  const reload = async () => {
+    data = await api.get(`/api/requests/${id}`);
+    await loadTrack();
+    if (ctx.isCurrent()) { paint(); drawMap(); }
+  };
   const after = async (res) => { if (res) { await reload(); ctx.refreshBadges(); } };
 
   function wire(r) {
@@ -237,6 +293,14 @@ export async function render(el, ctx) {
       await after(await assign(r, choice.riderId));
     }));
     el.querySelector('[data-act=collect]')?.addEventListener('click', async () => after(await recordCollection(r)));
+    el.querySelector('[data-act=notify]')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      try {
+        const res = await api.post(`/api/requests/${r.id}/notify`);
+        const n = res.notifications[0];
+        toast(n?.status === 'sent' ? `Sent to ${n.rider} by ${n.channel === 'whatsapp' ? 'WhatsApp' : 'SMS'}` : `Not sent: ${n?.error || 'unknown error'}`, n?.status === 'sent' ? 'ok' : 'warn');
+        await reload();
+      } catch (err) { toast(err.message, 'err'); }
+    }));
     el.querySelectorAll('[data-handover]').forEach((b) => b.addEventListener('click', async () => {
       after(await recordHandover(r, r.dropoffs.find((d) => d.id === +b.dataset.handover)));
     }));
@@ -255,6 +319,7 @@ export async function render(el, ctx) {
     });
   }
   paint();
-  ctx.poll(() => { if (!document.querySelector('.modal-back')) reload().catch(() => {}); }, 20000);
+  await drawMap();
+  ctx.poll(() => { if (!document.querySelector('.modal-back')) reload().catch(() => {}); }, 15000);
 
 }

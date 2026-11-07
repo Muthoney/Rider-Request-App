@@ -6,6 +6,9 @@ import {
   ROLES, STAFF, CATEGORIES, HANDLING, RIDER_TAGS, RESERVED, isStaff, assignmentConflicts, priorityRank,
 } from './rules.mjs';
 import { parseWhatsApp } from '../dist/js/whatsapp.js';
+import { isInKenya, lookupPlace, searchPlaces, KENYA_BOUNDS } from '../dist/js/kenya.js';
+import { FUEL_DEFAULTS, quote, routeKm, estimateMinutes, trackKm } from '../dist/js/fuel.js';
+import { noIntegrations, e164 } from './integrations.mjs';
 
 const SESSION_TTL_MS = 12 * 3600e3;
 export const TEMP_TTL_MS = 72 * 3600e3;
@@ -35,11 +38,14 @@ const SECURITY_HEADERS = {
   'X-Frame-Options': 'DENY',
   'Referrer-Policy': 'same-origin',
   'Cross-Origin-Opener-Policy': 'same-origin',
-  'Permissions-Policy': 'geolocation=(), camera=(), microphone=()',
+  'Permissions-Policy': 'geolocation=(self), camera=(), microphone=()',
+  // Google Maps JavaScript API needs its script, tile, font and worker hosts.
   'Content-Security-Policy':
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-    "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; " +
-    "base-uri 'none'; form-action 'self'",
+    "default-src 'self'; script-src 'self' https://maps.googleapis.com https://maps.gstatic.com; " +
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; " +
+    "img-src 'self' data: blob: https://*.googleapis.com https://*.gstatic.com https://*.google.com https://*.googleusercontent.com; " +
+    "connect-src 'self' https://*.googleapis.com https://*.google.com https://*.gstatic.com data: blob:; " +
+    "worker-src blob:; frame-src https://*.google.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
 };
 
 // ---------- small validation helpers ----------
@@ -78,9 +84,20 @@ const requireVersion = (body) => {
 const parseJson = (s, fallback) => {
   try { return JSON.parse(s); } catch { return fallback; }
 };
+const refOf = (id) => `RR-${String(id).padStart(4, '0')}`;
+const nairobiTime = (iso) => new Date(iso).toLocaleString('en-KE', {
+  timeZone: 'Africa/Nairobi', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+});
+/** Validates a pin: both coordinates or neither, and inside Kenya. */
+function kenyaPin(lat, lng, label) {
+  if ((lat == null) !== (lng == null)) throw bad(`${label}: give both latitude and longitude.`);
+  if (lat != null && !isInKenya(lat, lng)) throw bad(`${label} must be a location in Kenya.`);
+  return { lat, lng };
+}
 
 export function createApp({
   db, origin, cookieSecure = true, trustProxy = false, distDir, now = () => Date.now(), log = () => {},
+  integrations = noIntegrations(),
 }) {
   if (!origin) throw new Error('APP_ORIGIN is required');
   const allowedOrigin = new URL(origin).origin;
@@ -99,6 +116,7 @@ export function createApp({
     id: u.id, companyId: u.company_id, companyName: u.company_name, email: u.email, name: u.name, phone: u.phone,
     role: u.role, tags: parseJson(u.tags, []), active: !!u.active, mustChange: !!u.must_change,
     tempExpiresAt: u.temp_expires_at, lastLoginAt: u.last_login_at, createdAt: u.created_at,
+    ...(u.role === 'rider' ? { onShift: !!u.on_shift, onShiftSince: u.on_shift_since || null } : {}),
   });
 
   const dropoffOut = (d) => ({
@@ -117,7 +135,7 @@ export function createApp({
       address: r.pickup_address, contactName: r.pickup_contact_name, contactPhone: r.pickup_contact_phone,
       lat: r.pickup_lat, lng: r.pickup_lng,
     },
-    scheduledAt: r.scheduled_at, handling: parseJson(r.handling, []), handlingNotes: r.handling_notes, notes: r.notes,
+    scheduledAt: r.scheduled_at, handling: parseJson(r.handling, []).filter((h) => HANDLING.includes(h)), handlingNotes: r.handling_notes, notes: r.notes,
     cancelReason: r.cancel_reason, createdAt: r.created_at, updatedAt: r.updated_at, assignedAt: r.assigned_at,
     collectedAt: r.collected_at, deliveredAt: r.delivered_at,
     dropoffs: dropoffs.map(dropoffOut),
@@ -184,6 +202,122 @@ export function createApp({
     return { ...rider, tags: parseJson(rider.tags, []) };
   }
 
+  // ---------- rider notifications (WhatsApp first, SMS fallback) ----------
+  const inflight = new Set();
+  const background = (promise) => {
+    const p = promise.catch((err) => log('error', err)).finally(() => inflight.delete(p));
+    inflight.add(p);
+    return p;
+  };
+
+  function logSystem(companyId, requestId, action, message, meta) {
+    st(`INSERT INTO activity (company_id, request_id, user_id, action, message, meta, created_at) VALUES (?,?,?,?,?,?,?)`)
+      .run(companyId, requestId ?? null, null, action, message, meta ? JSON.stringify(meta) : null, iso());
+  }
+
+  function assignmentMessage(row, drops) {
+    const ref = refOf(row.id);
+    const when = row.scheduled_at ? nairobiTime(row.scheduled_at) : 'ASAP';
+    const pickupContact = [row.pickup_contact_name, row.pickup_contact_phone].filter(Boolean).join(' ');
+    const pickup = `${row.pickup_address}${pickupContact ? ` (${pickupContact})` : ''}`;
+    const dropText = drops.length === 1 ? drops[0].address : `${drops.length} stops, first: ${drops[0]?.address || '-'}`;
+    const link = `${allowedOrigin}/#/requests/${row.id}`;
+    const urgent = row.priority === 'urgent' ? 'URGENT ' : '';
+    return {
+      text: `${urgent}New delivery ${ref}: ${row.title}\nPickup ${when}: ${pickup}\nDrop-off: ${dropText}\nOpen: ${link}`,
+      params: [`${urgent}${ref}`, row.title, `${pickup} - ${when}`, dropText, link],
+    };
+  }
+
+  function recordNotification(row, rider, channel, status, { recipient = null, providerId = null, error = null } = {}) {
+    const t = iso();
+    st(`INSERT INTO notifications (company_id, request_id, user_id, channel, status, recipient, provider_id, error, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(row.company_id, row.id, rider.id, channel, status, recipient, providerId, error, t, t);
+    const label = channel === 'whatsapp' ? 'WhatsApp' : 'SMS';
+    const message = status === 'sent' ? `${rider.name} was notified by ${label}`
+      : status === 'skipped' ? `${rider.name} was not notified: ${error}`
+        : `${label} notification to ${rider.name} failed: ${error}`;
+    logSystem(row.company_id, row.id, status === 'sent' ? 'notified' : 'notify_failed', message, { channel, status });
+  }
+
+  /** Tells the assigned rider about the job. Never throws; every attempt is recorded. */
+  async function notifyRider(requestId, { smsOnly = false } = {}) {
+    const row = st('SELECT * FROM requests WHERE id = ?').get(requestId);
+    if (!row?.rider_id) return;
+    const rider = st('SELECT * FROM users WHERE id = ?').get(row.rider_id);
+    const drops = st('SELECT * FROM dropoffs WHERE request_id = ? ORDER BY seq').all(requestId);
+    const msg = assignmentMessage(row, drops);
+    const to = e164(rider.phone);
+    const { whatsapp, sms } = integrations;
+    if (!to) return recordNotification(row, rider, 'none', 'skipped', { error: 'the rider account has no valid mobile number' });
+    if (!whatsapp.configured && !sms.configured) {
+      return recordNotification(row, rider, 'none', 'skipped', { recipient: to, error: 'no WhatsApp or SMS provider is configured' });
+    }
+    if (!smsOnly && whatsapp.configured) {
+      try {
+        const { id } = await whatsapp.send({ to, text: msg.text, params: msg.params });
+        return recordNotification(row, rider, 'whatsapp', 'sent', { recipient: to, providerId: id });
+      } catch (err) {
+        recordNotification(row, rider, 'whatsapp', 'failed', { recipient: to, error: String(err.message).slice(0, 300) });
+      }
+    }
+    if (sms.configured) {
+      try {
+        const { id } = await sms.send({ to, text: msg.text });
+        recordNotification(row, rider, 'sms', 'sent', { recipient: to, providerId: id });
+      } catch (err) {
+        recordNotification(row, rider, 'sms', 'failed', { recipient: to, error: String(err.message).slice(0, 300) });
+      }
+    }
+  }
+
+  const notificationOut = (n) => ({
+    id: n.id, channel: n.channel, status: n.status, recipient: n.recipient, error: n.error, rider: n.rider_name,
+    createdAt: n.created_at, updatedAt: n.updated_at,
+  });
+  const listNotifications = (requestId) => st(`SELECT n.*, u.name AS rider_name FROM notifications n JOIN users u ON u.id = n.user_id
+    WHERE n.request_id = ? ORDER BY n.id DESC LIMIT 30`).all(requestId).map(notificationOut);
+
+  // ---------- fuel settings and trip costs ----------
+  function fuelSettings(companyId) {
+    const r = st('SELECT * FROM company_settings WHERE company_id = ?').get(companyId);
+    if (!r) return { ...FUEL_DEFAULTS, isDefault: true };
+    return {
+      fuelType: r.fuel_type, fuelPrice: r.fuel_price, fuelPriceUpdatedAt: r.fuel_price_updated_at, kmPerLitre: r.km_per_litre,
+      timeRatePerHour: r.time_rate_per_hour, baseFee: r.base_fee, roadFactor: r.road_factor, isDefault: false,
+    };
+  }
+
+  /** Stops with coordinates: exact pins first, otherwise the Kenyan landmark/street named in the address. */
+  function placedStops(row, drops) {
+    const place = (address, lat, lng) => (lat != null ? { lat, lng, exact: true } : (() => {
+      const p = lookupPlace(address);
+      return p ? { lat: p.lat, lng: p.lng, exact: false } : null;
+    })());
+    return [place(row.pickup_address, row.pickup_lat, row.pickup_lng), ...drops.map((d) => place(d.address, d.lat, d.lng))];
+  }
+
+  const riderTrack = (riderId, from, to) => st(`SELECT lat, lng, accuracy, recorded_at AS recordedAt FROM location_points
+    WHERE rider_id = ? AND recorded_at >= ? AND recorded_at <= ? ORDER BY recorded_at LIMIT 5000`).all(riderId, from, to);
+
+  function requestFuel(row, drops, settings = fuelSettings(row.company_id)) {
+    const stops = placedStops(row, drops);
+    const placed = stops.filter(Boolean);
+    const km = routeKm(placed, settings.roadFactor);
+    const estimate = {
+      ...quote({ km, minutes: estimateMinutes(km, drops.length + 1) }, settings),
+      source: 'estimate', placedStops: placed.length, totalStops: stops.length, exactStops: placed.filter((p) => p.exact).length,
+    };
+    let actual = null;
+    if (row.status === 'delivered' && row.assigned_at && row.delivered_at && row.rider_id) {
+      const gpsKm = trackKm(riderTrack(row.rider_id, row.assigned_at, row.delivered_at));
+      const minutes = (new Date(row.delivered_at) - new Date(row.assigned_at)) / 60e3;
+      actual = { ...quote({ km: gpsKm > 0.2 ? gpsKm : km, minutes }, settings), source: gpsKm > 0.2 ? 'gps' : 'estimate' };
+    }
+    const { fuelType, fuelPrice, fuelPriceUpdatedAt, kmPerLitre, timeRatePerHour, baseFee } = settings;
+    return { estimate, actual, settings: { fuelType, fuelPrice, fuelPriceUpdatedAt, kmPerLitre, timeRatePerHour, baseFee } };
+  }
+
   // ---------- request payload validation ----------
   function readRequestPayload(body) {
     const title = str(body.title, { max: 120, required: true, label: 'What is being delivered' });
@@ -196,8 +330,7 @@ export function createApp({
       address: str(p.address, { max: 300, required: true, label: 'Pickup address' }),
       contactName: str(p.contactName, { max: 120, label: 'Pickup contact' }),
       contactPhone: str(p.contactPhone, { max: 40, label: 'Pickup phone' }),
-      lat: num(p.lat, -90, 90, 'Pickup latitude'),
-      lng: num(p.lng, -180, 180, 'Pickup longitude'),
+      ...kenyaPin(num(p.lat, -90, 90, 'Pickup latitude'), num(p.lng, -180, 180, 'Pickup longitude'), 'The pickup pin'),
     };
     if (!Array.isArray(body.dropoffs) || body.dropoffs.length < 1) throw bad('Add at least one drop-off.');
     if (body.dropoffs.length > 12) throw bad('A request can have at most 12 drop-offs.');
@@ -205,8 +338,7 @@ export function createApp({
       address: str(d?.address, { max: 300, required: true, label: `Drop-off ${i + 1} address` }),
       contactName: str(d?.contactName, { max: 120, label: `Drop-off ${i + 1} contact` }),
       contactPhone: str(d?.contactPhone, { max: 40, label: `Drop-off ${i + 1} phone` }),
-      lat: num(d?.lat, -90, 90, `Drop-off ${i + 1} latitude`),
-      lng: num(d?.lng, -180, 180, `Drop-off ${i + 1} longitude`),
+      ...kenyaPin(num(d?.lat, -90, 90, `Drop-off ${i + 1} latitude`), num(d?.lng, -180, 180, `Drop-off ${i + 1} longitude`), `The drop-off ${i + 1} pin`),
       instructions: str(d?.instructions, { max: 500, label: `Drop-off ${i + 1} instructions` }),
     }));
     const handling = Array.isArray(body.handling) ? [...new Set(body.handling)] : [];
@@ -474,7 +606,13 @@ export function createApp({
       JOIN users u ON u.id = o.dispatcher_id JOIN users k ON k.id = o.rider_id WHERE o.request_id = ? ORDER BY o.id DESC`).all(id)
       .map((o) => ({ id: o.id, by: o.dispatcher_name, rider: o.rider_name, conflicts: parseJson(o.conflicts, []), reason: o.reason, createdAt: o.created_at }))
       : [];
-    return { request, records, activity, overrides };
+    const notifications = isStaff(user) ? listNotifications(id) : [];
+    let fuel = null;
+    if (user.role !== 'rider') {
+      const row = st('SELECT * FROM requests WHERE id = ?').get(id);
+      fuel = requestFuel(row, st('SELECT * FROM dropoffs WHERE request_id = ? ORDER BY seq').all(id));
+    }
+    return { request, records, activity, overrides, notifications, fuel };
   });
 
   route('PATCH', '/api/requests/:id', ({ user, params, body }) => {
@@ -551,7 +689,34 @@ export function createApp({
       }
       logActivity(user, id, 'assigned', `${user.name} assigned ${rider.name}${row.rider_name ? ` (was ${row.rider_name})` : ''}`);
     });
+    background(notifyRider(id));
     return { request: getVisibleRequest(user, id) };
+  });
+
+  route('POST', '/api/requests/:id/notify', async ({ user, params }) => {
+    needRole(user, STAFF);
+    const id = intId(params.id);
+    const row = getVisibleRequestRow(user, id);
+    if (!row.rider_id || !['assigned', 'collected'].includes(row.status)) {
+      throw new HttpError(409, 'bad_state', 'Only requests with an assigned rider can be re-sent.');
+    }
+    await notifyRider(id);
+    return { notifications: listNotifications(id) };
+  });
+
+  route('GET', '/api/requests/:id/track', ({ user, params }) => {
+    const row = getVisibleRequestRow(user, intId(params.id));
+    let rider = null;
+    if (row.rider_id && ['assigned', 'collected'].includes(row.status)) {
+      const l = st(`SELECT l.*, u.on_shift FROM rider_locations l JOIN users u ON u.id = l.rider_id WHERE l.rider_id = ?`).get(row.rider_id);
+      if (l?.on_shift) rider = { id: row.rider_id, name: row.rider_name, lat: l.lat, lng: l.lng, accuracy: l.accuracy, heading: l.heading, speed: l.speed, recordedAt: l.recorded_at };
+    }
+    let path = [];
+    if ((isStaff(user) || row.rider_id === user.id) && row.rider_id && row.assigned_at) {
+      path = riderTrack(row.rider_id, row.assigned_at, row.delivered_at || iso()).filter((p) => p.accuracy == null || p.accuracy <= 100)
+        .map((p) => ({ lat: p.lat, lng: p.lng }));
+    }
+    return { rider, path, status: row.status };
   });
 
   route('POST', '/api/requests/:id/collect', ({ user, params, body }) => {
@@ -696,35 +861,241 @@ export function createApp({
         WHERE s.company_id = ? AND s.starts_at < ? AND s.ends_at > ?${extra} ORDER BY s.starts_at`).all(...params).map(shiftOut),
     };
   });
-  route('POST', '/api/shifts', ({ user, body }) => {
-    needRole(user, STAFF);
-    const rider = getRider(user, intId(body.riderId, 'rider'));
-    const startsAt = isoDate(body.startsAt, 'Shift start');
-    const endsAt = isoDate(body.endsAt, 'Shift end');
-    if (!startsAt || !endsAt) throw bad('Shift start and end are required.');
-    if (endsAt <= startsAt) throw bad('The shift must end after it starts.');
-    if (new Date(endsAt) - new Date(startsAt) > 16 * 3600e3) throw bad('Shifts can be at most 16 hours.');
-    const overlap = st('SELECT 1 FROM shifts WHERE rider_id = ? AND starts_at < ? AND ends_at > ?').get(rider.id, endsAt, startsAt);
-    if (overlap) throw new HttpError(409, 'overlap', `${rider.name} already has a shift during that time.`);
-    const id = tx(db, () => {
-      const r = st('INSERT INTO shifts (company_id, rider_id, starts_at, ends_at, note, created_by, created_at) VALUES (?,?,?,?,?,?,?)')
-        .run(user.company_id, rider.id, startsAt, endsAt, str(body.note, { max: 200, label: 'Note' }), user.id, iso());
-      logActivity(user, null, 'shift_added', `${user.name} scheduled a shift for ${rider.name}`);
-      return r.lastInsertRowid;
-    });
-    return { shift: shiftOut(st('SELECT s.*, u.name AS rider_name FROM shifts s JOIN users u ON u.id = s.rider_id WHERE s.id = ?').get(id)) };
-  });
-  route('DELETE', '/api/shifts/:id', ({ user, params }) => {
-    needRole(user, STAFF);
-    const s = st('SELECT s.*, u.name AS rider_name FROM shifts s JOIN users u ON u.id = s.rider_id WHERE s.id = ? AND s.company_id = ?')
-      .get(intId(params.id), user.company_id);
-    if (!s) throw notFound('Shift not found.');
+  // Shift on/off switch. Staff can switch any rider; riders switch themselves. Switching off
+  // stores the completed shift in `shifts` (the shift log) and clears the rider's live position.
+  const riderShiftOut = (u) => ({ id: u.id, name: u.name, onShift: !!u.on_shift, onShiftSince: u.on_shift_since || null });
+  route('POST', '/api/riders/:id/shift', ({ user, params, body }) => {
+    const id = intId(params.id, 'rider');
+    if (!isStaff(user) && !(user.role === 'rider' && user.id === id)) throw forbidden('You can only switch your own shift.');
+    if (typeof body.onShift !== 'boolean') throw bad('Say whether the rider is on or off shift.');
+    const rider = st(`SELECT * FROM users WHERE id = ? AND company_id = ? AND role = 'rider'`).get(id, user.company_id);
+    if (!rider) throw notFound('Rider not found.');
+    if (!rider.active) throw bad(`${rider.name} is deactivated.`);
+    if (!!rider.on_shift === body.onShift) return { rider: riderShiftOut(rider) };
+    const self = user.id === rider.id;
     tx(db, () => {
-      st('DELETE FROM shifts WHERE id = ?').run(s.id);
-      logActivity(user, null, 'shift_removed', `${user.name} removed a shift for ${s.rider_name}`);
+      const t = iso();
+      if (body.onShift) {
+        st('UPDATE users SET on_shift = 1, on_shift_since = ? WHERE id = ?').run(t, id);
+        logActivity(user, null, 'shift_on', self ? `${rider.name} went on shift` : `${user.name} put ${rider.name} on shift`);
+      } else {
+        if (rider.on_shift_since && rider.on_shift_since < t) {
+          st('INSERT INTO shifts (company_id, rider_id, starts_at, ends_at, note, created_by, created_at) VALUES (?,?,?,?,?,?,?)')
+            .run(user.company_id, id, rider.on_shift_since, t, null, user.id, t);
+        }
+        st('UPDATE users SET on_shift = 0, on_shift_since = NULL WHERE id = ?').run(id);
+        st('DELETE FROM rider_locations WHERE rider_id = ?').run(id);
+        logActivity(user, null, 'shift_off', self ? `${rider.name} went off shift` : `${user.name} took ${rider.name} off shift`);
+      }
     });
-    return { ok: true };
+    return { rider: riderShiftOut(st('SELECT * FROM users WHERE id = ?').get(id)) };
   });
+
+  // Live GPS. Riders' browsers post positions only while they are on shift.
+  let pointsSincePrune = 0;
+  route('POST', '/api/location', ({ user, body }) => {
+    needRole(user, ['rider']);
+    const me = st('SELECT on_shift FROM users WHERE id = ?').get(user.id);
+    if (!me.on_shift) throw new HttpError(409, 'off_shift', 'Location is only shared while you are on shift.');
+    const lat = num(body.lat, -90, 90, 'Latitude');
+    const lng = num(body.lng, -180, 180, 'Longitude');
+    if (lat == null || lng == null) throw bad('Latitude and longitude are required.');
+    if (!isInKenya(lat, lng)) throw new HttpError(400, 'outside_kenya', 'Your location is outside Kenya, so it was not recorded.');
+    const accuracy = num(body.accuracy, 0, 100000, 'Accuracy');
+    const heading = num(body.heading, 0, 360, 'Heading');
+    const speed = num(body.speed, 0, 200, 'Speed');
+    let at = isoDate(body.recordedAt, 'Recorded at') || iso();
+    const t = now();
+    if (new Date(at) > t + 60e3 || new Date(at) < t - 15 * 60e3) at = iso();
+    const last = st('SELECT recorded_at FROM rider_locations WHERE rider_id = ?').get(user.id);
+    if (last && new Date(at) - new Date(last.recorded_at) < 4000) return { ok: true, stored: false };
+    tx(db, () => {
+      st(`INSERT INTO rider_locations (rider_id, company_id, lat, lng, accuracy, heading, speed, recorded_at) VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(rider_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, accuracy = excluded.accuracy,
+        heading = excluded.heading, speed = excluded.speed, recorded_at = excluded.recorded_at`)
+        .run(user.id, user.company_id, lat, lng, accuracy, heading, speed, at);
+      st('INSERT INTO location_points (company_id, rider_id, lat, lng, accuracy, speed, recorded_at) VALUES (?,?,?,?,?,?,?)')
+        .run(user.company_id, user.id, lat, lng, accuracy, speed, at);
+    });
+    if (++pointsSincePrune >= 1000) {
+      pointsSincePrune = 0;
+      st('DELETE FROM location_points WHERE recorded_at < ?').run(new Date(t - 90 * 864e5).toISOString());
+    }
+    return { ok: true, stored: true };
+  });
+
+  route('GET', '/api/live', ({ user }) => {
+    needRole(user, STAFF);
+    const rows = st(`SELECT u.id, u.name, u.phone, u.tags, u.on_shift, u.on_shift_since,
+        l.lat, l.lng, l.accuracy, l.heading, l.speed, l.recorded_at
+      FROM users u LEFT JOIN rider_locations l ON l.rider_id = u.id
+      WHERE u.company_id = ? AND u.role = 'rider' AND u.active = 1 ORDER BY u.on_shift DESC, u.name`).all(user.company_id);
+    const jobs = withDropoffs(st(`${REQUEST_SELECT} WHERE r.company_id = ? AND r.status IN ('assigned','collected')`).all(user.company_id));
+    return {
+      serverTime: iso(),
+      riders: rows.map((r) => ({
+        id: r.id, name: r.name, phone: r.phone, tags: parseJson(r.tags, []), onShift: !!r.on_shift, onShiftSince: r.on_shift_since,
+        location: r.on_shift && r.lat != null
+          ? { lat: r.lat, lng: r.lng, accuracy: r.accuracy, heading: r.heading, speed: r.speed, recordedAt: r.recorded_at } : null,
+        jobs: jobs.filter((j) => j.rider?.id === r.id).map((j) => ({
+          id: j.id, ref: j.ref, title: j.title, status: j.status, priority: j.priority, pickup: j.pickup,
+          next: j.status === 'assigned' ? { kind: 'pickup', ...j.pickup } : { kind: 'drop', ...(j.dropoffs.find((d) => d.status !== 'delivered') || {}) },
+        })),
+      })),
+    };
+  });
+
+  // Kenya-only address search: Google Geocoding (restricted to KE) when configured, else the built-in place list.
+  route('GET', '/api/geocode', async ({ user, query }) => {
+    needRole(user, ['requester', ...STAFF]);
+    const q = str(query.get('q'), { max: 200, required: true, label: 'Search' });
+    if (q.length < 2) throw bad('Type at least two characters.');
+    if (integrations.geocode.configured) {
+      try {
+        const results = await integrations.geocode.search(q);
+        if (results.length) return { results, source: 'google' };
+      } catch (err) { log('error', err); }
+    }
+    return { results: searchPlaces(q), source: 'gazetteer' };
+  });
+
+  route('GET', '/api/config', () => ({
+    maps: { browserKey: integrations.maps.browserKey || null, mapId: integrations.maps.mapId || null },
+    kenyaBounds: KENYA_BOUNDS,
+    geocoder: integrations.geocode.configured ? 'google' : 'gazetteer',
+    routing: integrations.routes.configured ? 'google' : 'estimate',
+    notifications: { whatsapp: integrations.whatsapp.configured, sms: integrations.sms.configured },
+  }));
+
+  // Fuel & quotes
+  route('GET', '/api/fuel/settings', ({ user }) => ({ settings: fuelSettings(user.company_id) }));
+  route('PATCH', '/api/fuel/settings', ({ user, body }) => {
+    needRole(user, ['admin', 'manager']);
+    const cur = fuelSettings(user.company_id);
+    const pick = (k, min, max, label) => (body[k] === undefined ? cur[k] : (() => {
+      const v = num(body[k], min, max, label);
+      if (v == null) throw bad(`${label} is required.`);
+      return v;
+    })());
+    const next = {
+      fuelPrice: pick('fuelPrice', 50, 1000, 'Fuel price per litre'),
+      kmPerLitre: pick('kmPerLitre', 5, 120, 'Kilometres per litre'),
+      timeRatePerHour: pick('timeRatePerHour', 0, 20000, 'Time rate per hour'),
+      baseFee: pick('baseFee', 0, 100000, 'Base fee'),
+      roadFactor: pick('roadFactor', 1, 3, 'Road factor'),
+      fuelType: body.fuelType === undefined ? cur.fuelType : body.fuelType,
+      fuelPriceUpdatedAt: body.fuelPriceUpdatedAt === undefined
+        ? (body.fuelPrice !== undefined && body.fuelPrice !== cur.fuelPrice ? iso().slice(0, 10) : cur.fuelPriceUpdatedAt)
+        : (isoDate(body.fuelPriceUpdatedAt, 'Price date') || iso()).slice(0, 10),
+    };
+    if (!['petrol', 'diesel'].includes(next.fuelType)) throw bad('Fuel type must be petrol or diesel.');
+    tx(db, () => {
+      st(`INSERT INTO company_settings (company_id, fuel_price, fuel_type, fuel_price_updated_at, km_per_litre, time_rate_per_hour, base_fee, road_factor, updated_by)
+        VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(company_id) DO UPDATE SET fuel_price = excluded.fuel_price, fuel_type = excluded.fuel_type,
+        fuel_price_updated_at = excluded.fuel_price_updated_at, km_per_litre = excluded.km_per_litre, time_rate_per_hour = excluded.time_rate_per_hour,
+        base_fee = excluded.base_fee, road_factor = excluded.road_factor, updated_by = excluded.updated_by`)
+        .run(user.company_id, next.fuelPrice, next.fuelType, next.fuelPriceUpdatedAt, next.kmPerLitre, next.timeRatePerHour, next.baseFee, next.roadFactor, user.id);
+      logActivity(user, null, 'fuel_settings', `${user.name} updated fuel pricing (KES ${next.fuelPrice}/L ${next.fuelType}, ${next.kmPerLitre} km/L)`);
+    });
+    return { settings: fuelSettings(user.company_id) };
+  });
+
+  route('POST', '/api/fuel/quote', async ({ user, body }) => {
+    needRole(user, ['requester', ...STAFF]);
+    const settings = fuelSettings(user.company_id);
+    let km = num(body.km, 0, 2000, 'Distance');
+    let minutes = num(body.minutes, 0, 24 * 60, 'Time');
+    let source = 'manual';
+    if (km == null) {
+      if (!Array.isArray(body.stops) || body.stops.length < 2 || body.stops.length > 13) throw bad('Give a distance, or at least two stops.');
+      const stops = body.stops.map((p, i) => {
+        const pin = kenyaPin(num(p?.lat, -90, 90, 'Latitude'), num(p?.lng, -180, 180, 'Longitude'), `Stop ${i + 1}`);
+        if (pin.lat != null) return pin;
+        const place = typeof p?.address === 'string' ? lookupPlace(p.address) : null;
+        if (!place) throw bad(`Stop ${i + 1} could not be placed in Kenya. Add a pin or a known landmark or street.`);
+        return { lat: place.lat, lng: place.lng };
+      });
+      source = 'estimate';
+      if (integrations.routes.configured) {
+        try {
+          const r = await integrations.routes.compute(stops);
+          km = r.km; if (minutes == null) minutes = r.minutes + stops.length * 5;
+          source = 'google';
+        } catch (err) { log('error', err); }
+      }
+      if (source === 'estimate') km = routeKm(stops, settings.roadFactor);
+      if (minutes == null) minutes = estimateMinutes(km, stops.length);
+    }
+    if (minutes == null) minutes = estimateMinutes(km, 2);
+    return { quote: quote({ km, minutes }, settings), source, settings };
+  });
+
+  route('GET', '/api/fuel/report', ({ user, query }) => {
+    needRole(user, STAFF);
+    const days = Math.min(Math.max(Number(query.get('days')) || 7, 1), 90);
+    const since = new Date(now() - days * 864e5).toISOString();
+    const until = iso();
+    const settings = fuelSettings(user.company_id);
+    const riders = st(`SELECT id, name FROM users WHERE company_id = ? AND role = 'rider' ORDER BY name`).all(user.company_id);
+    const trips = st(`SELECT r.*, k.name AS rider_name FROM requests r JOIN users k ON k.id = r.rider_id
+      WHERE r.company_id = ? AND r.status = 'delivered' AND r.delivered_at >= ? ORDER BY r.delivered_at DESC LIMIT 300`).all(user.company_id, since)
+      .map((r) => {
+        const f = requestFuel(r, st('SELECT * FROM dropoffs WHERE request_id = ? ORDER BY seq').all(r.id), settings);
+        const a = f.actual || f.estimate;
+        return { id: r.id, ref: refOf(r.id), title: r.title, rider: { id: r.rider_id, name: r.rider_name }, deliveredAt: r.delivered_at, ...a };
+      });
+    const perRider = riders.map((rd) => {
+      const km = trackKm(riderTrack(rd.id, since, until));
+      const litres = km / settings.kmPerLitre;
+      const shiftHours = st(`SELECT COALESCE(SUM((julianday(MIN(ends_at, ?)) - julianday(MAX(starts_at, ?))) * 24), 0) AS h
+        FROM shifts WHERE rider_id = ? AND ends_at > ?`).get(until, since, rd.id, since).h;
+      const mine = trips.filter((t) => t.rider.id === rd.id);
+      return {
+        id: rd.id, name: rd.name, gpsKm: Math.round(km * 10) / 10, litres: Math.round(litres * 100) / 100,
+        fuelCost: Math.round(litres * settings.fuelPrice), deliveries: mine.length, shiftHours: Math.round(shiftHours * 10) / 10,
+        quoted: mine.reduce((sum, t) => sum + t.total, 0),
+      };
+    }).filter((r) => r.gpsKm > 0 || r.deliveries > 0 || r.shiftHours > 0);
+    const totals = perRider.reduce((t, r) => ({
+      gpsKm: t.gpsKm + r.gpsKm, litres: t.litres + r.litres, fuelCost: t.fuelCost + r.fuelCost, deliveries: t.deliveries + r.deliveries, quoted: t.quoted + r.quoted,
+    }), { gpsKm: 0, litres: 0, fuelCost: 0, deliveries: 0, quoted: 0 });
+    return { days, settings, riders: perRider, trips, totals };
+  });
+
+  // WhatsApp Cloud API webhook: delivery statuses. A failed WhatsApp message falls back to SMS.
+  route('GET', '/api/webhooks/whatsapp', ({ query }) => {
+    const token = integrations.whatsapp.verifyToken;
+    if (!token || query.get('hub.mode') !== 'subscribe' || query.get('hub.verify_token') !== token) throw forbidden('Verification failed.');
+    return { __text: query.get('hub.challenge') || '' };
+  }, { public: true });
+
+  route('POST', '/api/webhooks/whatsapp', ({ req, body, raw }) => {
+    if (!integrations.whatsapp.validSignature(raw, req.headers['x-hub-signature-256'])) throw forbidden('Invalid signature.');
+    const RANK = { sent: 1, delivered: 2, read: 3 };
+    for (const entry of Array.isArray(body.entry) ? body.entry : []) {
+      for (const change of Array.isArray(entry?.changes) ? entry.changes : []) {
+        for (const stt of Array.isArray(change?.value?.statuses) ? change.value.statuses : []) {
+          if (typeof stt?.id !== 'string') continue;
+          const n = st(`SELECT * FROM notifications WHERE provider_id = ? AND channel = 'whatsapp'`).get(stt.id);
+          if (!n || n.status === 'failed') continue;
+          if (stt.status === 'failed') {
+            const error = String(stt.errors?.[0]?.title || stt.errors?.[0]?.message || 'WhatsApp could not deliver the message').slice(0, 300);
+            st(`UPDATE notifications SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`).run(error, iso(), n.id);
+            const rider = st('SELECT name FROM users WHERE id = ?').get(n.user_id);
+            logSystem(n.company_id, n.request_id, 'notify_failed', `WhatsApp could not deliver to ${rider?.name}: ${error}`, { channel: 'whatsapp' });
+            const reqRow = st('SELECT rider_id, status FROM requests WHERE id = ?').get(n.request_id);
+            const smsAlready = st(`SELECT 1 FROM notifications WHERE request_id = ? AND user_id = ? AND channel = 'sms' AND id > ?`).get(n.request_id, n.user_id, n.id);
+            if (reqRow?.rider_id === n.user_id && ['assigned', 'collected'].includes(reqRow.status) && !smsAlready && integrations.sms.configured) {
+              background(notifyRider(n.request_id, { smsOnly: true }));
+            }
+          } else if (RANK[stt.status] > (RANK[n.status] || 0)) {
+            st('UPDATE notifications SET status = ?, updated_at = ? WHERE id = ?').run(stt.status, iso(), n.id);
+          }
+        }
+      }
+    }
+    return { ok: true };
+  }, { public: true, webhook: true });
 
   // Activity
   function activityOut(a) {
@@ -769,14 +1140,14 @@ export function createApp({
     }
     let riders = [];
     if (isStaff(user)) {
-      const t = iso();
       riders = st(`SELECT u.id, u.name, u.tags,
           (SELECT COUNT(*) FROM requests r WHERE r.rider_id = u.id AND r.status IN ('assigned','collected')) AS open_jobs,
           (SELECT COUNT(*) FROM requests r WHERE r.rider_id = u.id AND r.status = 'delivered' AND r.delivered_at >= ?) AS done_today,
-          EXISTS (SELECT 1 FROM shifts s WHERE s.rider_id = u.id AND s.starts_at <= ? AND s.ends_at > ?) AS on_shift
+          u.on_shift, u.on_shift_since, u.phone
         FROM users u WHERE u.company_id = ? AND u.role = 'rider' AND u.active = 1 ORDER BY u.name`)
-        .all(startOfDay.toISOString(), t, t, user.company_id)
-        .map((r) => ({ id: r.id, name: r.name, tags: parseJson(r.tags, []), openJobs: r.open_jobs, doneToday: r.done_today, onShift: !!r.on_shift }));
+        .all(startOfDay.toISOString(), user.company_id)
+        .map((r) => ({ id: r.id, name: r.name, phone: r.phone, tags: parseJson(r.tags, []), openJobs: r.open_jobs, doneToday: r.done_today,
+          onShift: !!r.on_shift, onShiftSince: r.on_shift_since || null }));
     }
     return { byStatus, deliveredToday, urgentOpen, reservedWaiting, avgMinutes: avg ? Math.round(avg) : null, days, riders };
   });
@@ -796,12 +1167,13 @@ export function createApp({
       if (size > BODY_LIMIT) throw new HttpError(413, 'too_large', 'Request body is too large.');
       chunks.push(chunk);
     }
-    if (!size) return {};
+    if (!size) return { body: {}, raw: Buffer.alloc(0) };
     if (!String(req.headers['content-type'] || '').includes('application/json')) throw new HttpError(415, 'json_only', 'Send JSON.');
+    const raw = Buffer.concat(chunks);
     try {
-      const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      const parsed = JSON.parse(raw.toString('utf8'));
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
-      return parsed;
+      return { body: parsed, raw };
     } catch {
       throw bad('Malformed JSON.');
     }
@@ -820,12 +1192,12 @@ export function createApp({
       throw new HttpError(exists ? 405 : 404, exists ? 'method' : 'not_found', exists ? 'Method not allowed.' : 'Unknown endpoint.');
     }
     const mutating = method !== 'GET' && method !== 'HEAD';
-    if (mutating) {
+    if (mutating && !match.r.opts.webhook) {
       const o = req.headers.origin;
       if (!o || o !== allowedOrigin) throw new HttpError(403, 'bad_origin', 'Cross-origin request blocked.');
     }
-    const body = mutating ? await readBody(req) : {};
-    const ctx = { req, res, body, params: match.params, query: url.searchParams };
+    const { body, raw } = mutating ? await readBody(req) : { body: {}, raw: Buffer.alloc(0) };
+    const ctx = { req, res, body, raw, params: match.params, query: url.searchParams };
     if (!match.r.opts.public) {
       const session = loadSession(req);
       if (!session) throw new HttpError(401, 'unauthenticated', 'Please sign in.');
@@ -837,6 +1209,10 @@ export function createApp({
       ctx.user = session;
     }
     const out = await match.r.handler(ctx);
+    if (out && typeof out.__text === 'string') {
+      res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(out.__text);
+    }
     send(res, 200, out);
   }
 
@@ -862,7 +1238,7 @@ export function createApp({
     }
   }
 
-  return async function handler(req, res) {
+  async function handler(req, res) {
     const started = Date.now();
     let url;
     try {
@@ -882,7 +1258,10 @@ export function createApp({
     } finally {
       if (url?.pathname.startsWith('/api/')) log('info', `${req.method} ${url.pathname} ${res.statusCode} ${Date.now() - started}ms`);
     }
-  };
+  }
+  /** Resolves when background work (rider notifications) has finished. Used by tests and shutdown. */
+  handler.idle = () => Promise.allSettled([...inflight]);
+  return handler;
 }
 
 export { RESERVED };

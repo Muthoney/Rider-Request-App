@@ -4,7 +4,8 @@ import { html, ic, timeAgo, fmtDateTime, empty } from '../ui.js';
 const ICONS = {
   created: 'plus', edited: 'edit', assigned: 'bike', unassigned: 'bike', override: 'shield', collected: 'package',
   handover: 'hand', handover_failed: 'alert', delivered: 'checkCircle', cancelled: 'x', run: 'route', run_start: 'play',
-  run_finish: 'stop', run_delete: 'trash', shift_added: 'calendar', shift_removed: 'calendar', account_created: 'user',
+  run_finish: 'stop', run_delete: 'trash', shift_added: 'calendar', shift_removed: 'calendar', shift_on: 'power', shift_off: 'power',
+  notified: 'send', notify_failed: 'alert', fuel_settings: 'fuel', account_created: 'user',
   account_updated: 'user', password_reset: 'key', password_changed: 'lock',
 };
 export const activityIcon = (a) => ICONS[a] || 'activity';
@@ -12,10 +13,10 @@ export const activityIcon = (a) => ICONS[a] || 'activity';
 const FILTERS = [
   ['all', 'Everything', null],
   ['requests', 'Requests', ['created', 'edited', 'cancelled']],
-  ['dispatch', 'Dispatch', ['assigned', 'unassigned', 'override', 'run', 'run_start', 'run_finish', 'run_delete']],
+  ['dispatch', 'Dispatch', ['assigned', 'unassigned', 'override', 'run', 'run_start', 'run_finish', 'run_delete', 'notified', 'notify_failed']],
   ['delivery', 'Delivery', ['collected', 'handover', 'handover_failed', 'delivered']],
   ['overrides', 'Overrides', ['override']],
-  ['admin', 'People & shifts', ['shift_added', 'shift_removed', 'account_created', 'account_updated', 'password_reset', 'password_changed']],
+  ['admin', 'People & shifts', ['shift_added', 'shift_removed', 'shift_on', 'shift_off', 'fuel_settings', 'account_created', 'account_updated', 'password_reset', 'password_changed']],
 ];
 
 function groupByDay(items) {

@@ -37,6 +37,8 @@ const ROUTES = [
   { path: '/dispatch', view: 'dispatch', roles: STAFF },
   { path: '/runs', view: 'runs', roles: [...STAFF, 'rider'] },
   { path: '/shifts', view: 'shifts', roles: [...STAFF, 'rider'] },
+  { path: '/live', view: 'live', roles: STAFF },
+  { path: '/fuel', view: 'fuel', roles: STAFF },
   { path: '/activity', view: 'activity' },
   { path: '/accounts', view: 'accounts', roles: ['admin'] },
   { path: '/settings', view: 'settings' },
@@ -49,7 +51,10 @@ const NAV = [
   { href: '#/requests/new', label: 'New request', icon: 'plus', roles: ['admin', 'manager', 'dispatcher', 'requester'], section: 'Overview' },
   { href: '#/dispatch', label: 'Dispatch board', icon: 'board', roles: STAFF, section: 'Operations', badge: 'waiting' },
   { href: '#/runs', label: 'Runs', icon: 'route', roles: [...STAFF, 'rider'], section: 'Operations' },
-  { href: '#/shifts', label: 'Shifts', icon: 'calendar', roles: [...STAFF, 'rider'], section: 'Operations' },
+  { href: '#/live', label: 'Live map', icon: 'gps', roles: STAFF, section: 'Operations' },
+  { href: '#/shifts', label: 'Shifts', icon: 'power', roles: STAFF, section: 'Operations' },
+  { href: '#/shifts', label: 'My shift', icon: 'power', roles: ['rider'], section: 'Operations' },
+  { href: '#/fuel', label: 'Fuel & quotes', icon: 'fuel', roles: STAFF, section: 'Operations' },
   { href: '#/activity', label: 'Activity', icon: 'activity', section: 'Operations' },
   { href: '#/accounts', label: 'Manage accounts', icon: 'users', roles: ['admin'], section: 'Admin' },
   { href: '#/settings', label: 'Settings', icon: 'settings', section: 'Admin' },
@@ -105,6 +110,7 @@ function shellHtml(user) {
           <kbd>/</kbd>
         </form>` : html`<div class="grow"></div>`}
         <div class="grow"></div>
+        ${user.role === 'rider' ? html`<a class="gps-chip" id="gps-chip" href="#/shifts" title="Location sharing">${ic('gpsOff', 'sm')}<span>Off shift</span></a>` : ''}
         <button class="icon-btn" data-action="theme" title="Toggle theme" aria-label="Toggle theme">${ic(isDark() ? 'sun' : 'moon')}</button>
         ${user.role !== 'rider' ? html`<a class="btn primary sm" href="#/requests/new">${ic('plus', 'sm')}<span>New request</span></a>` : ''}
       </header>
@@ -129,6 +135,7 @@ function mountShell() {
       a.innerHTML = String(ic(isDark() ? 'sun' : 'moon'));
     }
     if (a.dataset.action === 'logout') {
+      stopRiderTracking();
       try { await api.post('/api/auth/logout'); } catch {}
       state.user = null; setCsrf(null); location.hash = '#/'; boot();
     }
@@ -228,12 +235,33 @@ async function boot() {
   }
   mountShell();
   refreshBadges();
+  if (state.user.role === 'rider') startRiderTracking();
   render();
+}
+
+// ---------- rider live location ----------
+let trackerUnsub = null;
+async function startRiderTracking() {
+  const { syncTracking, onTracker } = await import('./tracker.js');
+  trackerUnsub?.();
+  trackerUnsub = onTracker((t) => {
+    const chip = app.querySelector('#gps-chip');
+    if (!chip) return;
+    chip.className = `gps-chip ${t.status}`;
+    chip.title = t.message;
+    chip.innerHTML = String(html`${ic(t.status === 'live' ? 'gps' : 'gpsOff', 'sm')}<span>${t.status === 'live' ? 'Live GPS' : t.status === 'off' ? 'Off shift' : t.status === 'waiting' ? 'Finding GPS…' : 'GPS problem'}</span>`);
+  });
+  syncTracking(!!state.user.onShift);
+}
+function stopRiderTracking() {
+  trackerUnsub?.(); trackerUnsub = null;
+  import('./tracker.js').then((m) => m.stopTracking()).catch(() => {});
 }
 
 onAuthLost((err) => {
   if (!state.user) return;
   toast(err.code === 'password_change_required' ? 'Please replace your temporary password.' : 'Your session ended. Please sign in again.', 'warn');
+  stopRiderTracking();
   state.user = null;
   boot();
 });

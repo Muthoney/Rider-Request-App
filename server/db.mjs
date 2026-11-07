@@ -127,12 +127,69 @@ CREATE TABLE IF NOT EXISTS activity (
   meta TEXT,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS rider_locations (
+  rider_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  company_id INTEGER NOT NULL,
+  lat REAL NOT NULL,
+  lng REAL NOT NULL,
+  accuracy REAL,
+  heading REAL,
+  speed REAL,
+  recorded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS location_points (
+  id INTEGER PRIMARY KEY,
+  company_id INTEGER NOT NULL,
+  rider_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  lat REAL NOT NULL,
+  lng REAL NOT NULL,
+  accuracy REAL,
+  speed REAL,
+  recorded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY,
+  company_id INTEGER NOT NULL,
+  request_id INTEGER REFERENCES requests(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  channel TEXT NOT NULL CHECK (channel IN ('whatsapp','sms','none')),
+  status TEXT NOT NULL CHECK (status IN ('sent','delivered','read','failed','skipped')),
+  recipient TEXT,
+  provider_id TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS company_settings (
+  company_id INTEGER PRIMARY KEY REFERENCES companies(id),
+  fuel_price REAL NOT NULL,
+  fuel_type TEXT NOT NULL DEFAULT 'petrol',
+  fuel_price_updated_at TEXT NOT NULL,
+  km_per_litre REAL NOT NULL,
+  time_rate_per_hour REAL NOT NULL,
+  base_fee REAL NOT NULL,
+  road_factor REAL NOT NULL,
+  updated_by INTEGER
+);
 CREATE INDEX IF NOT EXISTS idx_requests_company ON requests(company_id, status);
 CREATE INDEX IF NOT EXISTS idx_requests_rider ON requests(rider_id);
 CREATE INDEX IF NOT EXISTS idx_dropoffs_request ON dropoffs(request_id, seq);
 CREATE INDEX IF NOT EXISTS idx_activity_company ON activity(company_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_shifts_company ON shifts(company_id, starts_at);
+CREATE INDEX IF NOT EXISTS idx_points_rider ON location_points(rider_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_request ON notifications(request_id, id);
+CREATE INDEX IF NOT EXISTS idx_notifications_provider ON notifications(provider_id);
 `;
+
+/** Additive migrations for databases created by earlier versions. */
+function migrate(db) {
+  const cols = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
+  if (!cols.has('on_shift')) db.exec('ALTER TABLE users ADD COLUMN on_shift INTEGER NOT NULL DEFAULT 0');
+  if (!cols.has('on_shift_since')) db.exec('ALTER TABLE users ADD COLUMN on_shift_since TEXT');
+  // "Keep cold" handling was retired; strip it from stored requests.
+  db.exec(`UPDATE requests SET handling = (SELECT json_group_array(value) FROM json_each(requests.handling) WHERE value != 'cold')
+    WHERE EXISTS (SELECT 1 FROM json_each(requests.handling) WHERE value = 'cold')`);
+}
 
 export function openDb(file = ':memory:') {
   if (file !== ':memory:') mkdirSync(path.dirname(file), { recursive: true });
@@ -140,6 +197,7 @@ export function openDb(file = ':memory:') {
   db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 

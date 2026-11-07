@@ -1,18 +1,20 @@
 import { api } from '../api.js';
-import { html, ic, statusBadge, categoryBadge, urgentBadge, fmtDateTime, fmtTime, HANDLING, telHref, mapsHref, empty, greeting, firstName } from '../ui.js';
+import { html, ic, statusBadge, categoryBadge, urgentBadge, fmtDateTime, fmtTime, HANDLING, telHref, mapsHref, empty, greeting, firstName, busy } from '../ui.js';
 import { recordCollection, recordHandover } from './request-detail.js';
+import { setShift } from './actions.js';
+import { onTracker } from '../tracker.js';
 
 export async function render(el, ctx) {
   let tab = 'active';
-  let requests, runs, shifts;
+  let requests, runs;
+  let shift = { onShift: !!ctx.user.onShift, onShiftSince: ctx.user.onShiftSince };
   const load = async () => {
-    const now = new Date();
-    const [a, b, c] = await Promise.all([
-      api.get('/api/requests?status=all'), api.get('/api/runs'),
-      api.get(`/api/shifts?from=${encodeURIComponent(new Date(now - 864e5).toISOString())}&to=${encodeURIComponent(new Date(+now + 7 * 864e5).toISOString())}`),
-    ]);
-    requests = a.requests; runs = b.runs; shifts = c.shifts;
+    const [a, b, me] = await Promise.all([api.get('/api/requests?status=all'), api.get('/api/runs'), api.get('/api/auth/me')]);
+    requests = a.requests; runs = b.runs;
+    shift = { onShift: !!me.user.onShift, onShiftSince: me.user.onShiftSince };
   };
+  let trackerOff = () => {};
+  ctx.onCleanup(() => trackerOff());
   await load();
 
   const job = (r) => {
@@ -60,17 +62,15 @@ export async function render(el, ctx) {
   const paint = () => {
     const active = requests.filter((r) => ['assigned', 'collected'].includes(r.status));
     const done = requests.filter((r) => r.status === 'delivered');
-    const now = Date.now();
-    const cur = shifts.find((s) => new Date(s.startsAt) <= now && new Date(s.endsAt) > now);
-    const nextShift = shifts.find((s) => new Date(s.startsAt) > now);
     const activeRun = runs.find((r) => r.status === 'active');
     const todayDone = done.filter((r) => new Date(r.deliveredAt).toDateString() === new Date().toDateString()).length;
     const list = tab === 'active' ? active : done.slice(0, 30);
     el.innerHTML = String(html`
       <div class="hello">
         <h1>${greeting()}, ${firstName(ctx.user.name)} 👋</h1>
-        <p>${cur ? `You're on shift until ${fmtTime(cur.endsAt)}.` : nextShift ? `Next shift: ${fmtDateTime(nextShift.startsAt)}.` : 'No upcoming shifts scheduled.'}${activeRun ? ` Active run: ${activeRun.name}.` : ''}</p>
+        <p>${shift.onShift ? `You're on shift since ${fmtTime(shift.onShiftSince)}.` : "You're off shift. Switch on to start receiving jobs and sharing your location."}${activeRun ? ` Active run: ${activeRun.name}.` : ''}</p>
         <div class="row wrap">
+          <button class="shift-toggle ${shift.onShift ? 'on' : ''}" id="shift" aria-pressed="${shift.onShift ? 'true' : 'false'}"><span class="knob">${ic('power', 'sm')}</span><span class="txt">${shift.onShift ? 'On shift' : 'Off shift'}</span></button>
           <div class="pill"><b>${active.filter((r) => r.status === 'assigned').length}</b><small>To collect</small></div>
           <div class="pill"><b>${active.filter((r) => r.status === 'collected').length}</b><small>In your bag</small></div>
           <div class="pill"><b>${todayDone}</b><small>Delivered today</small></div>
@@ -82,7 +82,16 @@ export async function render(el, ctx) {
       </div>
       ${list.length ? html`<div class="grid g-2">${list.map(job)}</div>`
         : html`<div class="card">${empty(tab === 'active' ? 'bike' : 'checkCircle', tab === 'active' ? 'No jobs right now' : 'Nothing completed yet', tab === 'active' ? 'When dispatch assigns you a delivery it will appear here.' : 'Delivered jobs will be listed here.')}</div>`}
-      <p class="faint" style="font-size:12px;margin-top:16px;display:flex;gap:6px;align-items:center">${ic('gpsOff', 'sm')} Background location tracking isn't connected. Collections and handovers are recorded without GPS.</p>`);
+      <p class="faint" id="gps-note" style="font-size:12px;margin-top:16px;display:flex;gap:6px;align-items:center"></p>`);
+    trackerOff();
+    trackerOff = onTracker((t) => {
+      const note = el.querySelector('#gps-note');
+      if (note) note.innerHTML = String(html`${ic(t.status === 'live' ? 'gps' : 'gpsOff', 'sm')} ${t.message}${t.active ? ' Keep this app open while riding — phones pause GPS when the app is in the background.' : ''}`);
+    });
+    el.querySelector('#shift').addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      const res = await setShift(ctx, { id: ctx.user.id, name: ctx.user.name }, !shift.onShift);
+      if (res) { shift = { onShift: res.onShift, onShiftSince: res.onShiftSince }; paint(); }
+    }));
     el.querySelectorAll('[data-t]').forEach((b) => b.addEventListener('click', () => { tab = b.dataset.t; paint(); }));
     el.querySelectorAll('[data-c]').forEach((b) => b.addEventListener('click', async () => {
       const r = requests.find((x) => x.id === +b.dataset.c);

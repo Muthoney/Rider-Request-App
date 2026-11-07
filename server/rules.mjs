@@ -5,7 +5,7 @@ export const STAFF = ['admin', 'manager', 'dispatcher'];
 export const CATEGORIES = ['general', 'triangle', 'finance'];
 export const RESERVED = ['triangle', 'finance'];
 export const RIDER_TAGS = ['triangle', 'finance'];
-export const HANDLING = ['fragile', 'keep_upright', 'confidential', 'signature', 'cash', 'cold', 'documents', 'heavy'];
+export const HANDLING = ['fragile', 'keep_upright', 'confidential', 'signature', 'cash', 'documents', 'heavy'];
 export const CATEGORY_LABEL = { general: 'General', triangle: 'Triangle', finance: 'Finance' };
 
 export const isStaff = (user) => STAFF.includes(user.role);

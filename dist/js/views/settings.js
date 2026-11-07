@@ -1,20 +1,26 @@
 import { html, ic, avatar, roleBadge, tagBadges, toast } from '../ui.js';
 import { passwordFields, wirePasswordForm } from './password.js';
 import { setTheme } from '../hosted.js';
+import { getConfig } from '../config.js';
 
-const INTEGRATIONS = [
-  ['message', 'WhatsApp Business notifications & OTP', 'Requests can be imported manually from pasted messages.'],
-  ['phone', 'SMS fallback', 'No SMS provider is configured.'],
-  ['shield', 'Microsoft SSO', 'Sign-in uses email and password.'],
-  ['gpsOff', 'Live rider positions & GPS handover checks', 'Maps are illustrative; records are not GPS-verified.'],
-  ['route', 'Address search & routing', 'Addresses are free text; pins come from pasted links.'],
-  ['doc', 'Email password recovery', 'Administrators issue temporary passwords instead.'],
-];
+function integrations(c) {
+  return [
+    ['message', 'WhatsApp job notifications', c.notifications.whatsapp, 'Riders get a WhatsApp message when assigned.', 'Set WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID.'],
+    ['phone', "SMS fallback (Africa's Talking)", c.notifications.sms, 'Sent when WhatsApp fails or is not set up.', 'Set AT_USERNAME and AT_API_KEY.'],
+    ['gps', 'Google Maps & live rider positions', !!c.maps.browserKey, 'Live map and request maps use Google Maps (Kenya).', 'Riders still share GPS; maps are drawn as illustrations until GOOGLE_MAPS_BROWSER_KEY is set.'],
+    ['search', 'Kenya address search', c.geocoder === 'google', 'Google geocoding, limited to Kenya.', 'Using the built-in list of Kenyan landmarks, streets and areas.'],
+    ['route', 'Road distances for quotes', c.routing === 'google', 'Google Routes API.', 'Straight-line distance × road factor.'],
+    ['shield', 'Microsoft SSO', false, '', 'Sign-in uses email and password.'],
+    ['gpsOff', 'GPS-verified handovers', false, '', 'Collections and handovers are recorded without a location check.'],
+    ['doc', 'Email password recovery', false, '', 'Administrators issue temporary passwords instead.'],
+  ];
+}
 
 export async function render(el, ctx) {
   const u = ctx.user;
   let theme = 'system';
   try { theme = localStorage.getItem('rr-theme') || 'system'; } catch {}
+  const cfg = await getConfig();
   el.innerHTML = String(html`
     <div class="page-head"><div><h1>Settings</h1><p>Your profile, appearance and security.</p></div></div>
     <div class="grid g-2" style="align-items:start">
@@ -42,10 +48,10 @@ export async function render(el, ctx) {
           </div>
         </section>
         <section class="card">
-          <div class="card-head"><div><h2>Not yet connected</h2><p>Planned integrations for launch</p></div></div>
-          <div class="list">${INTEGRATIONS.map(([i, t, d]) => html`
-            <div class="list-item"><span class="avatar" style="background:var(--surface-3);color:var(--muted)">${ic(i, 'sm')}</span>
-              <div class="grow"><b>${t}</b><div class="req-sub">${d}</div></div><span class="badge b-outline">Not connected</span></div>`)}</div>
+          <div class="card-head"><div><h2>Integrations</h2><p>Configured by the server administrator</p></div></div>
+          <div class="list">${integrations(cfg).map(([i, t, on, yes, no]) => html`
+            <div class="list-item"><span class="avatar" style="background:${on ? 'var(--brand-50)' : 'var(--surface-3)'};color:${on ? 'var(--brand)' : 'var(--muted)'}">${ic(i, 'sm')}</span>
+              <div class="grow"><b>${t}</b><div class="req-sub">${on ? yes : no}</div></div><span class="badge ${on ? 's-delivered' : 'b-outline'}">${on ? 'Connected' : 'Not connected'}</span></div>`)}</div>
         </section>
       </div>
       <section class="card">

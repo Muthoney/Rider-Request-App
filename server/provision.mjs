@@ -1,7 +1,7 @@
 // Idempotent account bootstrap. Creates example accounts that don't exist yet and writes their
 // temporary passwords to a private file in the data volume. Existing accounts are never reset.
 //   node server/provision.mjs            accounts only
-//   node server/provision.mjs --sample   also add sample requests, shifts and a run (for demos)
+//   node server/provision.mjs --sample   also add sample requests, a shift log, riders on shift with demo GPS, and a run
 import { writeFileSync, chmodSync } from 'node:fs';
 import path from 'node:path';
 import { openDb, tx } from './db.mjs';
@@ -90,14 +90,27 @@ function seed(companyId) {
     if (rider) act.run(companyId, rid, U.dispatch, 'assigned', `Cynthia Mwangi assigned the rider`, t(ago + 10));
     if (status === 'delivered') act.run(companyId, rid, rider, 'delivered', 'All drop-offs delivered', t(ago + 70));
   }
+  // Shift log for the past week, and three riders switched on shift now with a demo GPS position.
   const day = new Date(); day.setHours(8, 0, 0, 0);
   const insShift = db.prepare('INSERT INTO shifts (company_id, rider_id, starts_at, ends_at, note, created_by, created_at) VALUES (?,?,?,?,?,?,?)');
-  for (let d = -1; d < 6; d++) {
+  for (let d = -6; d < 0; d++) {
     for (const [k, start, len] of [['rider.felix', 8, 9], ['rider.grace', 8, 8], ['rider.hassan', 10, 8], ['rider.irene', 12, 8]]) {
       if ((d + k.length) % 7 === 6) continue;
       const s = new Date(day.getTime() + d * 864e5 + (start - 8) * 3600e3);
       insShift.run(companyId, U[k], s.toISOString(), new Date(s.getTime() + len * 3600e3).toISOString(), null, U.dispatch, now);
     }
+  }
+  const insLoc = db.prepare(`INSERT OR REPLACE INTO rider_locations (rider_id, company_id, lat, lng, accuracy, heading, speed, recorded_at) VALUES (?,?,?,?,?,?,?,?)`);
+  const insPoint = db.prepare('INSERT INTO location_points (company_id, rider_id, lat, lng, accuracy, speed, recorded_at) VALUES (?,?,?,?,?,?,?)');
+  for (const [k, track] of [
+    ['rider.felix', [[-1.2649, 36.8028], [-1.2700, 36.7900], [-1.2760, 36.7760]]],
+    ['rider.grace', [[-1.2649, 36.8028], [-1.2750, 36.8150], [-1.2840, 36.8240]]],
+    ['rider.hassan', [[-1.2649, 36.8028], [-1.2900, 36.7700], [-1.3050, 36.7450]]],
+  ]) {
+    db.prepare('UPDATE users SET on_shift = 1, on_shift_since = ? WHERE id = ?').run(t(-180), U[k]);
+    track.forEach(([lat, lng], i) => insPoint.run(companyId, U[k], lat, lng, 12, 24, t(-30 + i * 14.5)));
+    const [lat, lng] = track.at(-1);
+    insLoc.run(U[k], companyId, lat, lng, 12, 210, 24, t(-1));
   }
   const run = db.prepare(`INSERT INTO runs (company_id, rider_id, name, status, created_by, created_at, started_at) VALUES (?,?,?,?,?,?,?)`)
     .run(companyId, U['rider.grace'], 'Afternoon finance loop', 'active', U.dispatch, t(-140), t(-130));

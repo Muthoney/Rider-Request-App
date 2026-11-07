@@ -33,7 +33,7 @@ export async function assign(request, riderId, { riderName } = {}) {
   const send = (override) => api.post(`/api/requests/${request.id}/assign`, { version: request.version, riderId, ...(override ? { override } : {}) });
   try {
     const res = await send();
-    toast(riderId ? `${request.ref} assigned to ${res.request.rider?.name}` : `${request.ref} moved back to the queue`);
+    toast(riderId ? `${request.ref} assigned to ${res.request.rider?.name} · notifying the rider` : `${request.ref} moved back to the queue`);
     return res.request;
   } catch (err) {
     if (err.code === 'override_required') {
@@ -41,12 +41,26 @@ export async function assign(request, riderId, { riderName } = {}) {
       if (!reason) return null;
       try {
         const res = await send({ acknowledged: true, reason });
-        toast(`Override recorded · ${request.ref} assigned to ${res.request.rider?.name}`, 'warn');
+        toast(`Override recorded · ${request.ref} assigned to ${res.request.rider?.name} · notifying the rider`, 'warn');
         return res.request;
       } catch (e2) { return handleError(e2); }
     }
     return handleError(err);
   }
+}
+
+/** Switch a rider on or off shift. Starts/stops this device's GPS sharing when riders switch themselves. */
+export async function setShift(ctx, rider, onShift) {
+  try {
+    const res = await api.post(`/api/riders/${rider.id}/shift`, { onShift });
+    if (rider.id === ctx.user.id) {
+      ctx.setUser({ onShift: res.rider.onShift, onShiftSince: res.rider.onShiftSince });
+      const { syncTracking } = await import('../tracker.js');
+      syncTracking(res.rider.onShift);
+    }
+    toast(res.rider.onShift ? `${rider.id === ctx.user.id ? 'You are' : `${rider.name} is`} on shift` : `${rider.id === ctx.user.id ? 'You are' : `${rider.name} is`} off shift`);
+    return res.rider;
+  } catch (err) { toast(err.message, 'err'); return null; }
 }
 
 export function handleError(err) {

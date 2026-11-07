@@ -317,20 +317,34 @@ describe('runs and shifts', () => {
     assert.ok(!(await otherRider.get('/api/runs')).data.runs.some((x) => x.id === run.data.run.id));
   });
 
-  test('shifts cannot overlap and riders only see their own', async () => {
+  test('riders are switched on and off shift; switching off records the shift', async () => {
     const d = await as('dispatch@alpha.test');
-    const start = new Date(Date.now() - 3600e3);
-    const end = new Date(Date.now() + 3600e3);
     const rid = s.ids['rider.tri@alpha.test'];
-    const ok = await d.post('/api/shifts', { riderId: rid, startsAt: start.toISOString(), endsAt: end.toISOString() });
-    assert.equal(ok.status, 200);
-    const overlap = await d.post('/api/shifts', { riderId: rid, startsAt: new Date(Date.now()).toISOString(), endsAt: new Date(Date.now() + 7200e3).toISOString() });
-    assert.equal(overlap.status, 409);
-    assert.equal((await d.post('/api/shifts', { riderId: rid, startsAt: end.toISOString(), endsAt: start.toISOString() })).status, 400);
-    const stats = await d.get('/api/stats');
-    assert.equal(stats.data.riders.find((r) => r.id === rid).onShift, true);
+    const on = await d.post(`/api/riders/${rid}/shift`, { onShift: true });
+    assert.equal(on.status, 200);
+    assert.equal(on.data.rider.onShift, true);
+    assert.equal((await d.get('/api/stats')).data.riders.find((r) => r.id === rid).onShift, true);
+    assert.equal((await d.post(`/api/riders/${rid}/shift`, { onShift: 'yes' })).status, 400);
+
     const other = await as('rider.gen@alpha.test');
+    assert.equal((await other.post(`/api/riders/${rid}/shift`, { onShift: false })).status, 403);
+    const self = await as('rider.tri@alpha.test');
+    assert.equal((await self.get('/api/auth/me')).data.user.onShift, true);
+    s.db.prepare('UPDATE users SET on_shift_since = ? WHERE id = ?').run(new Date(Date.now() - 3600e3).toISOString(), rid);
+    const off = await self.post(`/api/riders/${rid}/shift`, { onShift: false });
+    assert.equal(off.data.rider.onShift, false);
+    const log = (await d.get('/api/shifts')).data.shifts.filter((x) => x.rider.id === rid);
+    assert.equal(log.length, 1);
+    assert.ok(new Date(log[0].endsAt) - new Date(log[0].startsAt) >= 3599e3);
     assert.ok(!(await other.get('/api/shifts')).data.shifts.some((x) => x.rider.id === rid));
+    const requester = await as('req.one@alpha.test');
+    assert.equal((await requester.post(`/api/riders/${rid}/shift`, { onShift: true })).status, 403);
+  });
+
+  test('the old shift calendar endpoints are gone', async () => {
+    const d = await as('dispatch@alpha.test');
+    const r = await d.post('/api/shifts', { riderId: s.ids['rider.tri@alpha.test'], startsAt: new Date().toISOString(), endsAt: new Date(Date.now() + 3600e3).toISOString() });
+    assert.equal(r.status, 405);
   });
 });
 

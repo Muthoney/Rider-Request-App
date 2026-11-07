@@ -29,3 +29,13 @@ Every query is scoped by the signed-in user's `company_id`. Requesters are furth
 ## Front end
 
 The front end is plain ES modules with no build step. `ui.js` provides an auto-escaping `html` tagged template, toasts and accessible modals (focus trap, Escape, restore focus). Views live in `dist/js/views/`, are loaded on demand by the hash router in `hosted.js`, and poll quietly while visible. The CSS design tokens in `dist/css/app.css` cover light and dark themes.
+
+## Shifts, GPS and fuel
+
+A rider is either on or off shift (`users.on_shift`, `on_shift_since`). Switching off writes a row to `shifts`, which is the shift log. Riders' browsers post positions to `/api/location` only while on shift. The latest fix is kept in `rider_locations` and the history in `location_points`. Track distance (`dist/js/fuel.js` → `trackKm`) ignores fixes worse than 100 m, jitter under 15 m, jumps faster than 120 km/h, and gaps over 30 minutes.
+
+Every pin is validated against Kenya's bounding box (`dist/js/kenya.js`). Stops without a pin are placed from the most specific Kenyan landmark, street, area or town named in the address. If the address names a town outside Nairobi, Nairobi streets with the same name are ignored.
+
+## Notifications
+
+`server/integrations.mjs` wraps the providers. Assignment calls `notifyRider` in the background, after the transaction commits: WhatsApp first, then SMS. Each attempt is a row in `notifications` and an activity entry. The WhatsApp webhook updates statuses and triggers the SMS fallback when a message fails. `handler.idle()` resolves once background sends finish (used by tests and on shutdown).

@@ -11,7 +11,6 @@ const HANDLING_WORDS = [
   ['confidential', /\bconfidential|sealed|private\b/i],
   ['signature', /\bsignature|sign(ed)? for|must sign\b/i],
   ['cash', /\bcash|cheque|money\b/i],
-  ['cold', /\bcold|chilled|frozen|keep cool\b/i],
   ['documents', /\bdocuments?|papers|envelope|files?\b/i],
   ['heavy', /\bheavy|bulky\b/i],
 ];

@@ -1,10 +1,12 @@
 // Cross-platform local runner (Windows, macOS, Linux).
-// Sets development defaults, then runs a server script:
+// Loads .env.local if present, sets development defaults, then runs a server script:
 //   node scripts/local.mjs dev | provision [--sample] | backup
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+// Optional private keys for local development (Google Maps, WhatsApp, SMS). Git ignores it.
+try { process.loadEnvFile(path.join(root, '.env.local')); } catch {}
 const defaults = {
   APP_ORIGIN: 'http://127.0.0.1:3000',
   COOKIE_SECURE: 'false',
