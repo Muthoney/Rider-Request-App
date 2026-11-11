@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { html, ic, avatar, roleBadge, tagBadges, timeAgo, openModal, toast, confirmDialog, busy, ROLE_LABEL, empty } from '../ui.js';
+import { html, ic, avatar, roleBadge, tagBadges, timeAgo, openModal, toast, confirmDialog, busy, ROLE_LABEL, empty, vehicleBadge } from '../ui.js';
 
 function tempPasswordDialog(user, password) {
   return openModal({
@@ -32,7 +32,15 @@ function accountForm(u = null) {
           <label class="chip"><input type="checkbox" name="tags" value="triangle" ${u?.tags?.includes('triangle') ? 'checked' : ''}>${ic('triangle', 'sm')} Triangle</label>
           <label class="chip"><input type="checkbox" name="tags" value="finance" ${u?.tags?.includes('finance') ? 'checked' : ''}>${ic('coins', 'sm')} Finance</label>
         </div>
-        <span class="hint">Designated riders get reserved work; assigning them other jobs while reserved work waits needs a recorded override.</span>
+        <span class="hint">Designated riders get reserved work; assigning them other jobs while reserved work waits needs a recorded override. Riders only see open jobs their designation allows.</span>
+      </div>
+      <div class="field full" data-tags>
+        <span class="label">Motorcycle</span>
+        <div class="seg" role="radiogroup" aria-label="Motorcycle">
+          <label><input type="radio" name="vehicle" value="petrol" ${(u?.vehicle || 'petrol') === 'petrol' ? 'checked' : ''}>${ic('fuel', 'sm')} Petrol</label>
+          <label><input type="radio" name="vehicle" value="electric" ${u?.vehicle === 'electric' ? 'checked' : ''}>${ic('zap', 'sm')} Electric</label>
+        </div>
+        <span class="hint">Trip costs and quotes use litres of fuel or kWh of electricity accordingly.</span>
       </div>
     </div>
     <p class="error-text" id="aerr" hidden></p>`;
@@ -48,7 +56,7 @@ export async function render(el, ctx) {
     body: accountForm(u),
     actions: html`<button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">${u ? 'Save changes' : 'Create account'}</button>`,
     onMount: ({ form, close }) => {
-      const sync = () => { form.querySelector('[data-tags]').hidden = form.role.value !== 'rider'; };
+      const sync = () => { form.querySelectorAll('[data-tags]').forEach((x) => { x.hidden = form.role.value !== 'rider'; }); };
       form.role.addEventListener('change', sync); sync();
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -56,6 +64,7 @@ export async function render(el, ctx) {
         const body = {
           name: form.name.value.trim(), phone: form.phone.value.trim() || null, role: form.role.value,
           tags: [...form.querySelectorAll('[name=tags]:checked')].map((x) => x.value),
+          ...(form.role.value === 'rider' ? { vehicle: form.vehicle.value } : {}),
         };
         if (!body.name) { err.textContent = 'Enter a name.'; err.hidden = false; return; }
         try {
@@ -72,7 +81,7 @@ export async function render(el, ctx) {
     const count = (r) => users.filter((u) => r === 'all' || u.role === r).length;
     el.innerHTML = String(html`
       <div class="page-head">
-        <div><h1>Manage accounts</h1><p>Create accounts, set roles and rider designations, and issue temporary passwords.</p></div>
+        <div><h1>Manage accounts</h1><p>Create accounts, set roles, rider designations and vehicles, and issue temporary passwords. Managers have read-only access; dispatchers can make changes.</p></div>
         <button class="btn primary" id="create">${ic('plus', 'sm')} Create account</button>
       </div>
       <div class="tabs">${['all', 'admin', 'manager', 'dispatcher', 'requester', 'rider'].map((r) => html`
@@ -83,7 +92,7 @@ export async function render(el, ctx) {
         <tbody>${list.map((u) => html`
           <tr style="${u.active ? '' : 'opacity:.55'}">
             <td><div class="row">${avatar(u.name)}<div><b>${u.name}</b>${u.id === ctx.user.id ? html` <span class="badge b-outline">You</span>` : ''}<div class="req-sub">${u.email}${u.phone ? ` · ${u.phone}` : ''}</div></div></div></td>
-            <td><div class="row wrap" style="gap:6px">${roleBadge(u.role)}${tagBadges(u.tags)}</div></td>
+            <td><div class="row wrap" style="gap:6px">${roleBadge(u.role)}${tagBadges(u.tags)}${u.role === 'rider' ? vehicleBadge(u.vehicle) : ''}</div></td>
             <td class="hide-sm">${!u.active ? html`<span class="badge s-cancelled dot">Deactivated</span>`
               : u.mustChange ? html`<span class="badge s-pending dot" title="Expires ${new Date(u.tempExpiresAt).toLocaleString()}">${new Date(u.tempExpiresAt) < new Date() ? 'Temp password expired' : 'Awaiting first sign-in'}</span>`
               : html`<span class="badge s-delivered dot">Active</span>`}</td>

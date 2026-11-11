@@ -1,17 +1,21 @@
 import { api } from '../api.js';
-import { html, ic, statusBadge, categoryBadge, urgentBadge, fmtDateTime, fmtTime, HANDLING, telHref, mapsHref, empty, greeting, firstName, busy } from '../ui.js';
+import {
+  html, ic, statusBadge, categoryBadge, urgentBadge, fmtDateTime, fmtTime, HANDLING, telHref, mapsHref, empty, greeting, firstName, busy,
+  scheduleBadge, timeAgo, routeMini, tagBadges,
+} from '../ui.js';
 import { recordCollection, recordHandover } from './request-detail.js';
-import { setShift } from './actions.js';
+import { setShift, acceptJob } from './actions.js';
 import { onTracker } from '../tracker.js';
 
 export async function render(el, ctx) {
-  let tab = 'active';
-  let requests, runs;
+  let tab = ctx.query.get('tab') || 'active';
+  let requests, runs, open = [];
   let shift = { onShift: !!ctx.user.onShift, onShiftSince: ctx.user.onShiftSince };
   const load = async () => {
-    const [a, b, me] = await Promise.all([api.get('/api/requests?status=all'), api.get('/api/runs'), api.get('/api/auth/me')]);
-    requests = a.requests; runs = b.runs;
+    const [a, b, me, avail] = await Promise.all([api.get('/api/requests?status=all'), api.get('/api/runs'), api.get('/api/auth/me'), api.get('/api/jobs/available')]);
+    requests = a.requests; runs = b.runs; open = avail.jobs;
     shift = { onShift: !!me.user.onShift, onShiftSince: me.user.onShiftSince };
+    ctx.setUser({ onShift: shift.onShift, onShiftSince: shift.onShiftSince });
   };
   let trackerOff = () => {};
   ctx.onCleanup(() => trackerOff());
@@ -26,7 +30,7 @@ export async function render(el, ctx) {
         <div class="grow">
           <div class="row wrap" style="gap:6px">${statusBadge(r.status)}${urgentBadge(r.priority)}${categoryBadge(r.category)}</div>
           <a href="#/requests/${r.id}" style="text-decoration:none"><h3 style="margin-top:6px">${r.title}</h3></a>
-          <div class="req-sub"><span class="mono">${r.ref}</span>${r.scheduledAt ? html`· ${ic('calendar', 'sm')} ${fmtDateTime(r.scheduledAt)}` : ''}${r.runName ? html`· ${ic('route', 'sm')} ${r.runName}` : ''}</div>
+          <div class="req-sub"><span class="mono">${r.ref}</span>${r.scheduledAt ? html`· ${ic('calendar', 'sm')} Pickup ${fmtDateTime(r.scheduledAt)}` : ''}${r.runName ? html`· ${ic('route', 'sm')} ${r.runName}` : ''}</div>
         </div>
       </div>
       ${r.handling.length ? html`<div class="chips" style="padding:0 18px 12px">${r.handling.map((h) => html`<span class="badge">${ic(HANDLING[h].icon)}${HANDLING[h].label}</span>`)}</div>` : ''}
@@ -59,12 +63,32 @@ export async function render(el, ctx) {
     </section>`;
   };
 
+  /** A waiting job the rider may take. Only jobs matching their designation are offered by the server. */
+  const openJob = (r) => html`
+    <section class="card job open-job ${r.priority === 'urgent' ? 'urgent' : ''} cat-${r.category}">
+      <div class="job-head">
+        <span class="avatar lg" style="background:var(--st-pending-bg);color:var(--st-pending)">${ic(r.category === 'triangle' ? 'triangle' : r.category === 'finance' ? 'coins' : 'box')}</span>
+        <div class="grow">
+          <div class="row wrap" style="gap:6px">${urgentBadge(r.priority)}${categoryBadge(r.category)}${scheduleBadge(r)}</div>
+          <a href="#/requests/${r.id}" style="text-decoration:none"><h3 style="margin-top:6px">${r.title}</h3></a>
+          <div class="req-sub"><span class="mono">${r.ref}</span>· ${r.dropoffs.length} drop-off${r.dropoffs.length > 1 ? 's' : ''} · ${r.scheduledAt ? `pickup ${fmtDateTime(r.scheduledAt)}` : `requested ${timeAgo(r.createdAt)}`}</div>
+        </div>
+      </div>
+      <div style="padding:0 18px 14px">${routeMini(r, 2)}</div>
+      ${r.handling.length ? html`<div class="chips" style="padding:0 18px 12px">${r.handling.map((h) => html`<span class="badge">${ic(HANDLING[h].icon)}${HANDLING[h].label}</span>`)}</div>` : ''}
+      <div class="job-actions" style="padding-top:14px;border-top:1px solid var(--line)">
+        <a class="btn lg" href="#/requests/${r.id}">${ic('eye', 'sm')} Details</a>
+        <button class="btn primary lg" data-accept="${r.id}" data-busy=" Accepting…" ${shift.onShift ? '' : 'disabled title="Switch on shift to accept jobs"'}>${ic('hand2', 'sm')} Accept job</button>
+      </div>
+    </section>`;
+
   const paint = () => {
     const active = requests.filter((r) => ['assigned', 'collected'].includes(r.status));
     const done = requests.filter((r) => r.status === 'delivered');
     const activeRun = runs.find((r) => r.status === 'active');
     const todayDone = done.filter((r) => new Date(r.deliveredAt).toDateString() === new Date().toDateString()).length;
-    const list = tab === 'active' ? active : done.slice(0, 30);
+    const list = tab === 'active' ? active : tab === 'open' ? open : done.slice(0, 30);
+    const tags = ctx.user.tags || [];
     el.innerHTML = String(html`
       <div class="hello">
         <h1>${greeting()}, ${firstName(ctx.user.name)} 👋</h1>
@@ -74,14 +98,20 @@ export async function render(el, ctx) {
           <div class="pill"><b>${active.filter((r) => r.status === 'assigned').length}</b><small>To collect</small></div>
           <div class="pill"><b>${active.filter((r) => r.status === 'collected').length}</b><small>In your bag</small></div>
           <div class="pill"><b>${todayDone}</b><small>Delivered today</small></div>
+          <button class="pill pill-open" data-t="open"><b>${open.length}</b><small>Open to accept</small></button>
         </div>
       </div>
       <div class="tabs" role="tablist">
-        <button role="tab" data-t="active" class="${tab === 'active' ? 'on' : ''}">Active jobs<span class="n">${active.length}</span></button>
+        <button role="tab" data-t="active" class="${tab === 'active' ? 'on' : ''}">My active jobs<span class="n">${active.length}</span></button>
+        <button role="tab" data-t="open" class="${tab === 'open' ? 'on' : ''}">Available to accept<span class="n ${open.length ? 'hot' : ''}">${open.length}</span></button>
         <button role="tab" data-t="done" class="${tab === 'done' ? 'on' : ''}">Completed<span class="n">${done.length}</span></button>
       </div>
-      ${list.length ? html`<div class="grid g-2">${list.map(job)}</div>`
-        : html`<div class="card">${empty(tab === 'active' ? 'bike' : 'checkCircle', tab === 'active' ? 'No jobs right now' : 'Nothing completed yet', tab === 'active' ? 'When dispatch assigns you a delivery it will appear here.' : 'Delivered jobs will be listed here.')}</div>`}
+      ${tab === 'open' ? html`<div class="alert ${shift.onShift ? 'info' : 'warn'}" style="margin-bottom:14px">${ic(shift.onShift ? 'hand2' : 'power', 'sm')}<span>${shift.onShift
+        ? html`Jobs shown match your designation${tags.length ? html` (${tagBadges(tags)})` : ' (general work)'}. Accept one to make it yours. Dispatch can still assign you other work.`
+        : 'Switch on shift to accept jobs.'}</span></div>` : ''}
+      ${list.length ? html`<div class="grid g-2">${list.map(tab === 'open' ? openJob : job)}</div>`
+        : html`<div class="card">${tab === 'open' ? empty('hand2', 'No open jobs for you', 'Waiting jobs that match your designation appear here. Dispatch may also assign you work directly.')
+          : empty(tab === 'active' ? 'bike' : 'checkCircle', tab === 'active' ? 'No jobs right now' : 'Nothing completed yet', tab === 'active' ? 'Accept an open job, or wait for dispatch to assign you one.' : 'Delivered jobs will be listed here.')}</div>`}
       <p class="faint" id="gps-note" style="font-size:12px;margin-top:16px;display:flex;gap:6px;align-items:center"></p>`);
     trackerOff();
     trackerOff = onTracker((t) => {
@@ -93,6 +123,13 @@ export async function render(el, ctx) {
       if (res) { shift = { onShift: res.onShift, onShiftSince: res.onShiftSince }; paint(); }
     }));
     el.querySelectorAll('[data-t]').forEach((b) => b.addEventListener('click', () => { tab = b.dataset.t; paint(); }));
+    el.querySelectorAll('[data-accept]').forEach((b) => b.addEventListener('click', () => busy(b, async () => {
+      const r = open.find((x) => x.id === +b.dataset.accept);
+      const res = await acceptJob(r);
+      await load();
+      if (res) tab = 'active';
+      if (ctx.isCurrent()) paint();
+    })));
     el.querySelectorAll('[data-c]').forEach((b) => b.addEventListener('click', async () => {
       const r = requests.find((x) => x.id === +b.dataset.c);
       if (await recordCollection(r)) { await load(); paint(); }

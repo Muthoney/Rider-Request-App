@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { html, ic, raw, CATEGORY, HANDLING, toast, busy, toLocalInput, fromLocalInput, esc } from '../ui.js';
+import { html, ic, raw, CATEGORY, HANDLING, toast, busy, toLocalInput, esc, fmtDateTime, timeAgo } from '../ui.js';
 import { parseWhatsApp, parsePin } from '../whatsapp.js';
 import { renderMap, placePoints } from '../map.js';
 import { isInKenya } from '../kenya.js';
@@ -17,6 +17,17 @@ Contact: Print desk 0711 000 203
 Note: fragile – keep upright, signature needed`;
 
 const blankStop = () => ({ address: '', contactName: '', contactPhone: '', lat: null, lng: null, instructions: '' });
+const MAX_DAYS = 180;
+const dayStr = (d) => toLocalInput(d.toISOString()).slice(0, 10);
+/** Quick schedule presets (local time). */
+function presets() {
+  const at = (days, h, m = 0) => { const d = new Date(); d.setDate(d.getDate() + days); d.setHours(h, m, 0, 0); return d; };
+  const soon = new Date(Date.now() + 2 * 3600e3); soon.setMinutes(soon.getMinutes() < 30 ? 30 : 60, 0, 0);
+  const monday = at(((8 - new Date().getDay()) % 7) || 7, 9);
+  return [
+    ['In 2 hours', soon], ['Tomorrow 9:00', at(1, 9)], ['Tomorrow 14:00', at(1, 14)], ['Next Monday 9:00', monday],
+  ].filter(([, d]) => d > new Date());
+}
 
 export async function render(el, ctx) {
   const editing = !!ctx.params.id;
@@ -38,6 +49,12 @@ export async function render(el, ctx) {
   let fuelSettings = null;
   api.get('/api/fuel/settings').then((r) => { fuelSettings = r.settings; refreshSummary(); }).catch(() => {});
   let schedule = !!state.scheduledAt;
+  // Opened from a "Schedule" button: start in scheduling mode with tomorrow 9:00 proposed.
+  if (!editing && ctx.query.get('schedule') === '1') {
+    schedule = true;
+    const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0);
+    state.scheduledAt = d.toISOString();
+  }
   let parsed = null;
   const showImport = ctx.query.get('import') === '1';
 
@@ -78,7 +95,7 @@ export async function render(el, ctx) {
     state.category = f.category.value;
     state.priority = f.urgent.checked ? 'urgent' : 'normal';
     schedule = f.when.value === 'later';
-    state.scheduledAt = schedule ? fromLocalInput(f.scheduledAt.value) : null;
+    state.scheduledAt = schedule && f.sDate.value && f.sTime.value ? new Date(`${f.sDate.value}T${f.sTime.value}`).toISOString() : null;
     state.pickup.address = f.p_address.value;
     state.pickup.contactName = f.p_contactName.value;
     state.pickup.contactPhone = f.p_contactPhone.value;
@@ -108,10 +125,10 @@ export async function render(el, ctx) {
         ${pts.length ? raw(renderMap(pts, { width: 360, height: 210, compact: true })) : html`<div class="map" style="height:150px;display:grid;place-items:center;color:var(--muted)">${ic('pin')} Add addresses to preview the route</div>`}
         <dl class="kv" style="grid-template-columns:96px 1fr">
           <dt>Category</dt><dd>${CATEGORY[state.category].label}</dd>
-          <dt>Pickup</dt><dd>${state.scheduledAt ? new Date(state.scheduledAt).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'As soon as possible'}</dd>
+          <dt>Pickup</dt><dd>${schedule && state.scheduledAt ? html`<span class="badge s-scheduled">${ic('calendar')}Scheduled</span> ${new Date(state.scheduledAt).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} <span class="muted">(${timeAgo(state.scheduledAt)})</span>` : schedule ? html`<span class="muted">Choose a date and time</span>` : 'As soon as possible'}</dd>
           <dt>Stops</dt><dd>1 pickup · ${state.dropoffs.length} drop-off${state.dropoffs.length > 1 ? 's' : ''}</dd>
           <dt>Handling</dt><dd>${state.handling.length ? state.handling.map((h) => HANDLING[h].label).join(', ') : 'Standard'}</dd>
-          <dt>Quote</dt><dd>${est ? html`<b>${kes(est.total)}</b> <span class="muted">≈ ${est.km} km · ${est.minutes} min · ${est.litres} L fuel</span>` : html`<span class="muted">Add Kenyan addresses or pins to estimate</span>`}</dd>
+          <dt>Quote</dt><dd>${est ? html`<b>${kes(est.total)}</b> <span class="muted">≈ ${est.km} km · ${est.minutes} min · ${est.energy} ${est.unit} ${est.vehicle === 'electric' ? 'electricity' : 'fuel'}</span>` : html`<span class="muted">Add Kenyan addresses or pins to estimate</span>`}</dd>
         </dl>
         ${state.category !== 'general' ? html`<div class="alert info">${ic(CATEGORY[state.category].icon, 'sm')}<span>${CATEGORY[state.category].label} work is reserved for designated riders. Dispatch must record a reason to substitute.</span></div>` : ''}
       </div>`;
@@ -136,7 +153,7 @@ export async function render(el, ctx) {
     el.innerHTML = String(html`
     <div class="crumbs"><a href="#/requests">Requests</a>${ic('chevronRight', 'sm')}<span>${editing ? existing.ref : 'New'}</span></div>
     <div class="page-head">
-      <div><h1>${editing ? `Edit ${existing.ref}` : 'New delivery request'}</h1>
+      <div><h1>${editing ? `Edit ${existing.ref}` : schedule ? 'Schedule a delivery' : 'New delivery request'}</h1>
         <p>${editing ? 'Changes are version-checked, so you will never overwrite someone else’s update.' : 'Tell us what is moving, where from and where to. A dispatcher will assign a rider.'}</p></div>
     </div>
     <div class="grid g-main-wide">
@@ -152,13 +169,29 @@ export async function render(el, ctx) {
                 <label class="choice"><input type="radio" name="category" value="${k}" ${state.category === k ? 'checked' : ''}>
                   <b>${ic(c.icon, 'sm')}${c.label}</b><small>${c.desc}</small></label>`)}</div>
             </div>
-            <div class="row wrap" style="gap:24px">
-              <label class="switch"><input type="checkbox" name="urgent" ${state.priority === 'urgent' ? 'checked' : ''}> ${ic('flag', 'sm')} Urgent</label>
-              <div class="seg" role="radiogroup" aria-label="Pickup time">
-                <label><input type="radio" name="when" value="now" ${!schedule ? 'checked' : ''}>${ic('clock', 'sm')} As soon as possible</label>
-                <label><input type="radio" name="when" value="later" ${schedule ? 'checked' : ''}>${ic('calendar', 'sm')} Schedule pickup</label>
+            <label class="switch"><input type="checkbox" name="urgent" ${state.priority === 'urgent' ? 'checked' : ''}> ${ic('flag', 'sm')} Urgent</label>
+          </div>
+        </section>
+
+        <section class="card" id="when-card">
+          <div class="card-head"><span class="section-title"><span class="si">${ic('calendar', 'sm')}</span><div><h2>When</h2><p>Send a rider now, or schedule the pickup for a future date</p></div></span></div>
+          <div class="card-body stack">
+            <div class="choice-cards two" role="radiogroup" aria-label="Pickup time">
+              <label class="choice"><input type="radio" name="when" value="now" ${!schedule ? 'checked' : ''}>
+                <b>${ic('clock', 'sm')}As soon as possible</b><small>The next available rider is assigned.</small></label>
+              <label class="choice"><input type="radio" name="when" value="later" ${schedule ? 'checked' : ''}>
+                <b>${ic('calendarPlus', 'sm')}Schedule for later</b><small>Choose a date and time, up to ${MAX_DAYS} days ahead.</small></label>
+            </div>
+            <div class="schedule-box stack-sm" data-schedule ${schedule ? '' : 'hidden'}>
+              <div class="form-grid">
+                <div class="field"><label for="sDate">Pickup date</label>
+                  <input class="input" type="date" id="sDate" name="sDate" min="${dayStr(new Date())}" max="${dayStr(new Date(Date.now() + MAX_DAYS * 864e5))}" value="${toLocalInput(state.scheduledAt).slice(0, 10)}"></div>
+                <div class="field"><label for="sTime">Pickup time</label>
+                  <input class="input" type="time" id="sTime" name="sTime" step="900" value="${toLocalInput(state.scheduledAt).slice(11, 16)}"></div>
               </div>
-              <input class="input" type="datetime-local" name="scheduledAt" aria-label="Scheduled pickup time" value="${toLocalInput(state.scheduledAt)}" style="width:auto" ${schedule ? '' : 'hidden'}>
+              <div class="chips" role="group" aria-label="Quick picks">${presets().map(([label, d]) => html`
+                <button type="button" class="chip" data-preset="${d.toISOString()}">${ic('clock', 'sm')}${label}</button>`)}</div>
+              <span class="hint" id="s-hint">The request shows as <b>Scheduled</b>. Dispatch assigns a rider before the pickup time, and the rider is notified.</span>
             </div>
           </div>
         </section>
@@ -203,7 +236,7 @@ export async function render(el, ctx) {
       <aside class="stack sticky">
         <section class="card wa">
           <div class="card-head">
-            <span class="section-title"><span class="wa-ic">${ic('message', 'sm')}</span><div><h3>Import from WhatsApp</h3><p>Paste a message and map pins</p></div></span>
+            <span class="section-title"><span class="wa-ic">${ic('whatsapp', 'sm')}</span><div><h3>Import from WhatsApp</h3><p>Paste a message and map pins</p></div></span>
           </div>
           <div class="card-body stack-sm">
             <textarea class="input" id="wa-text" rows="${showImport ? 9 : 5}" placeholder="Paste the WhatsApp message here…" aria-label="WhatsApp message"></textarea>
@@ -224,18 +257,25 @@ export async function render(el, ctx) {
   function wire() {
     const f = el.querySelector('#rf');
     f.addEventListener('input', refreshSummary);
+    const box = el.querySelector('[data-schedule]');
+    const setWhen = (iso) => { const v = toLocalInput(iso); f.sDate.value = v.slice(0, 10); f.sTime.value = v.slice(11, 16); };
     f.addEventListener('change', (e) => {
       if (e.target.name === 'when') {
         const later = f.when.value === 'later';
-        f.scheduledAt.hidden = !later;
-        if (later && !f.scheduledAt.value) {
-          const d = new Date(Date.now() + 60 * 60e3); d.setMinutes(0, 0, 0);
-          f.scheduledAt.value = toLocalInput(d.toISOString());
+        box.hidden = !later;
+        if (later && !f.sDate.value) {
+          const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0);
+          setWhen(d.toISOString());
         }
-        if (later) f.scheduledAt.focus();
+        if (later) f.sDate.focus();
       }
       refreshSummary();
     });
+    el.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => {
+      setWhen(b.dataset.preset);
+      el.querySelectorAll('[data-preset]').forEach((x) => x.classList.toggle('on', x === b));
+      refreshSummary();
+    }));
     el.querySelectorAll('[data-pin]').forEach((inp) => inp.addEventListener('change', () => {
       const key = inp.dataset.pin;
       const stop = key === 'p' ? state.pickup : state.dropoffs[+key];
@@ -341,11 +381,17 @@ export async function render(el, ctx) {
     if (!state.title.trim()) missing.push(f.title);
     if (!state.pickup.address.trim()) missing.push(f.p_address);
     state.dropoffs.forEach((d, i) => { if (!d.address.trim()) missing.push(el.querySelector(`#d${i}-address`)); });
-    if (schedule && !state.scheduledAt) missing.push(f.scheduledAt);
+    if (schedule && !state.scheduledAt) missing.push(f.sDate.value ? f.sTime : f.sDate);
     if (missing.length) {
       missing.forEach((x) => x.setAttribute('aria-invalid', 'true'));
-      errBox.innerHTML = String(html`${ic('alert', 'sm')}<span>Fill in the highlighted fields: a description, the pickup address and every drop-off address.</span>`);
+      errBox.innerHTML = String(html`${ic('alert', 'sm')}<span>Fill in the highlighted fields: a description, the pickup address, every drop-off address${schedule ? ', and the pickup date and time' : ''}.</span>`);
       errBox.hidden = false; missing[0].focus();
+      return;
+    }
+    if (schedule && new Date(state.scheduledAt) < Date.now()) {
+      f.sTime.setAttribute('aria-invalid', 'true');
+      errBox.innerHTML = String(html`${ic('alert', 'sm')}<span>The scheduled pickup is in the past. Choose a future date and time.</span>`);
+      errBox.hidden = false; f.sDate.focus();
       return;
     }
     const payload = {
@@ -358,7 +404,7 @@ export async function render(el, ctx) {
         const res = editing
           ? await api.patch(`/api/requests/${existing.id}`, { ...payload, version: state.version })
           : await api.post('/api/requests', payload);
-        toast(editing ? 'Changes saved' : `Request ${res.request.ref} submitted`);
+        toast(editing ? 'Changes saved' : res.request.scheduledAt ? `Request ${res.request.ref} scheduled for ${fmtDateTime(res.request.scheduledAt)}` : `Request ${res.request.ref} submitted`);
         ctx.refreshBadges();
         ctx.navigate(`/requests/${res.request.id}`);
       } catch (err) {

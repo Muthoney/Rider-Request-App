@@ -24,7 +24,7 @@ const ACCOUNTS = [
   { email: 'rider.felix@example.com', name: 'Felix Ouma', role: 'rider', phone: '+254700000011', tags: ['triangle'] },
   { email: 'rider.grace@example.com', name: 'Grace Akinyi', role: 'rider', phone: '+254700000012', tags: ['finance'] },
   { email: 'rider.hassan@example.com', name: 'Hassan Ali', role: 'rider', phone: '+254700000013' },
-  { email: 'rider.irene@example.com', name: 'Irene Chebet', role: 'rider', phone: '+254700000014' },
+  { email: 'rider.irene@example.com', name: 'Irene Chebet', role: 'rider', phone: '+254700000014', vehicle: 'electric' },
 ];
 
 const db = openDb(DB_FILE);
@@ -38,8 +38,8 @@ tx(db, () => {
   for (const a of ACCOUNTS) {
     if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(a.email)) continue;
     const temp = tempPassword();
-    db.prepare(`INSERT INTO users (company_id, email, name, phone, role, tags, password_hash, must_change, temp_expires_at, created_at)
-      VALUES (?,?,?,?,?,?,?,1,?,?)`).run(companyId, a.email, a.name, a.phone, a.role, JSON.stringify(a.tags || []), hashPassword(temp), expires, now);
+    db.prepare(`INSERT INTO users (company_id, email, name, phone, role, tags, vehicle, password_hash, must_change, temp_expires_at, created_at)
+      VALUES (?,?,?,?,?,?,?,?,1,?,?)`).run(companyId, a.email, a.name, a.phone, a.role, JSON.stringify(a.tags || []), a.vehicle || 'petrol', hashPassword(temp), expires, now);
     created.push({ email: a.email, role: a.role, temporaryPassword: temp, expiresAt: expires });
   }
   if (sample && !db.prepare('SELECT 1 FROM requests WHERE company_id = ?').get(companyId)) seed(companyId);
@@ -74,10 +74,11 @@ function seed(companyId) {
     ['Triangle event banners', 'triangle', 'normal', 'assigned', U.studio, U['rider.felix'], ['heavy'], [['Venue, Lavington', 'Event manager', '+254711000208', -1.2780, 36.7690]], -60],
     ['Hard drive to post-production', 'general', 'normal', 'delivered', U.studio, U['rider.irene'], ['fragile'], [['Edit suite, Kileleshwa', 'Tom', '+254711000209', -1.2810, 36.7830]], -300],
     ['Invoices to client', 'finance', 'normal', 'delivered', U.finance, U['rider.grace'], ['documents', 'signature'], [['Client HQ, Gigiri', 'Accounts', '+254711000210', -1.2330, 36.8050]], -420],
+    ['Quarterly brochures to the printer', 'general', 'normal', 'pending', U.studio, null, ['heavy'], [['Print House, Industrial Area', 'Print desk', '+254711000203', -1.3065, 36.8530]], -20, 26 * 60],
   ];
-  for (const [title, cat, pri, status, req, rider, handling, drops, ago] of items) {
+  for (const [title, cat, pri, status, req, rider, handling, drops, ago, scheduleIn] of items) {
     const created = t(ago);
-    const r = insReq.run(companyId, req, title, cat, pri, status, ...HQ, status === 'pending' && cat === 'general' ? t(45) : null,
+    const r = insReq.run(companyId, req, title, cat, pri, status, ...HQ, scheduleIn ? t(scheduleIn) : status === 'pending' && cat === 'general' ? t(45) : null,
       JSON.stringify(handling), handling.includes('cash') ? 'Count with recipient before handing over.' : null, null,
       title.includes('Triangle') ? 'whatsapp' : 'form', rider, created, created,
       rider ? t(ago + 10) : null, ['collected', 'delivered'].includes(status) ? t(ago + 25) : null, status === 'delivered' ? t(ago + 70) : null);

@@ -1,13 +1,14 @@
 import { api } from '../api.js';
 import {
   html, ic, raw, statusBadge, categoryBadge, urgentBadge, avatar, timeAgo, fmtDateTime, fmtTime, HANDLING, CATEGORY,
-  openModal, toast, busy, telHref, mapsHref,
+  openModal, toast, busy, telHref, mapsHref, canWrite, readOnlyChip, isUpcoming, exportBtn, vehicleBadge,
 } from '../ui.js';
+import { photoField, wirePhoto, signatureField, wireSignature } from '../capture.js';
 import { mountRouteMap, requestPoints } from '../map.js';
 import { breakdown } from './fuel.js';
 import { kes } from '../fuel.js';
-import { activityIcon } from './activity.js';
-import { assign, pickRiderDialog, handleError } from './actions.js';
+import { activityIcon, exportActivity } from './activity.js';
+import { assign, pickRiderDialog, handleError, acceptJob } from './actions.js';
 
 const STAFF = ['admin', 'manager', 'dispatcher'];
 
@@ -17,15 +18,29 @@ export function collectDialog(r) {
     body: html`
       <div class="field"><label for="cf">Collected from</label><input class="input" id="cf" name="collectedFrom" required value="${r.pickup.contactName || ''}" placeholder="Name of the person who handed over" autofocus></div>
       <div class="field"><label for="ci">Number of items <span class="muted">(optional)</span></label><input class="input" id="ci" name="itemCount" type="number" min="1" max="999" inputmode="numeric"></div>
+      ${photoField({ label: 'Photo of the items at pickup', required: true, hint: 'Show the parcel(s) and any seals or labels' })}
+      <div class="field"><label for="cdn">D-note number <span class="muted">(optional)</span></label><input class="input" id="cdn" name="dnoteRef" maxlength="60" placeholder="e.g. DN-20431"></div>
+      ${signatureField({ label: 'Sender signs the D-note', hint: 'The person handing over signs to confirm what was collected.' })}
       <div class="field"><label for="cn">Note</label><textarea class="input" id="cn" name="note" maxlength="500" placeholder="Condition of items, seals, anything unusual"></textarea></div>
       ${r.handling.length ? html`<div class="chips">${r.handling.map((h) => html`<span class="badge">${ic(HANDLING[h].icon)}${HANDLING[h].label}</span>`)}</div>` : ''}
+      <p class="error-text" id="c-err" hidden></p>
       <div class="gps-off">${ic('gpsOff', 'sm')} Location check not connected — the collection is recorded without GPS verification</div>`,
     actions: html`<button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">${ic('check', 'sm')} Confirm collection</button>`,
-    onMount: ({ form, close }) => form.addEventListener('submit', (e) => {
-      e.preventDefault();
-      if (!form.collectedFrom.value.trim()) { form.collectedFrom.setAttribute('aria-invalid', 'true'); form.collectedFrom.focus(); return; }
-      close({ collectedFrom: form.collectedFrom.value.trim(), itemCount: form.itemCount.value ? Number(form.itemCount.value) : null, note: form.note.value.trim() || null });
-    }),
+    onMount: ({ form, close }) => {
+      const photo = wirePhoto(form);
+      const sign = wireSignature(form);
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const err = form.querySelector('#c-err');
+        err.hidden = true;
+        if (!form.collectedFrom.value.trim()) { form.collectedFrom.setAttribute('aria-invalid', 'true'); form.collectedFrom.focus(); return; }
+        if (!photo.value) { err.textContent = 'Take a photo of the items before confirming the collection.'; err.hidden = false; photo.flag(); return; }
+        close({
+          collectedFrom: form.collectedFrom.value.trim(), itemCount: form.itemCount.value ? Number(form.itemCount.value) : null, note: form.note.value.trim() || null,
+          photo: photo.value, signature: sign.empty ? null : sign.dataUrl(), dnoteRef: form.dnoteRef.value.trim() || null,
+        });
+      });
+    },
   });
 }
 
@@ -38,27 +53,41 @@ export function handoverDialog(r, d) {
         <label><input type="radio" name="outcome" value="failed">${ic('alert', 'sm')} Couldn't deliver</label>
       </div>
       <div class="field" data-when="delivered"><label for="rb">Received by</label><input class="input" id="rb" name="receivedBy" value="${d.contactName || ''}" placeholder="Full name of the recipient" autofocus></div>
+      <div data-photo-slot>${photoField({ label: 'Photo of the delivery', required: true, hint: 'Show the items with the recipient or at the door' })}</div>
+      <div class="field" data-when="delivered"><label for="hdn">D-note number <span class="muted">(optional)</span></label><input class="input" id="hdn" name="dnoteRef" maxlength="60" placeholder="e.g. DN-20431"></div>
+      <div data-when="delivered">${signatureField({ label: 'Recipient signs the D-note', required: true, hint: 'Hand the phone to the recipient to sign for the delivery.' })}</div>
       <div class="field"><label for="hn" data-label>Note <span class="muted">(optional)</span></label><textarea class="input" id="hn" name="note" maxlength="500" placeholder="e.g. Signed at reception"></textarea></div>
-      ${r.handling.includes('signature') ? html`<div class="alert info">${ic('pen', 'sm')}<span>Signature required — confirm the recipient signed the delivery note.</span></div>` : ''}
       ${r.handling.includes('cash') ? html`<div class="alert warn">${ic('coins', 'sm')}<span>Count the cash with the recipient before handing over.</span></div>` : ''}
       <div class="gps-off">${ic('gpsOff', 'sm')} Handover GPS verification is not connected</div>
       <p class="error-text" id="h-err" hidden></p>`,
     actions: html`<button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">${ic('check', 'sm')} Record handover</button>`,
     onMount: ({ form, close }) => {
+      const photo = wirePhoto(form);
+      const sign = wireSignature(form);
+      const photoReq = form.querySelector('[data-photo-slot] .req');
       const sync = () => {
         const failed = form.outcome.value === 'failed';
-        form.querySelector('[data-when=delivered]').hidden = failed;
+        form.querySelectorAll('[data-when=delivered]').forEach((x) => { x.hidden = failed; });
+        if (photoReq) { photoReq.textContent = failed ? 'Optional' : 'Required'; photoReq.classList.toggle('opt', failed); }
         form.querySelector('[data-label]').innerHTML = failed ? 'What happened? <span class="error-text">*</span>' : 'Note <span class="muted">(optional)</span>';
         form.note.placeholder = failed ? 'e.g. Office closed, recipient unreachable' : 'e.g. Signed at reception';
+        if (!failed) window.dispatchEvent(new Event('resize'));
       };
-      form.addEventListener('change', sync);
+      form.addEventListener('change', (e) => { if (e.target.name === 'outcome') sync(); });
       form.addEventListener('submit', (e) => {
         e.preventDefault();
         const outcome = form.outcome.value;
         const err = form.querySelector('#h-err');
+        err.hidden = true;
         if (outcome === 'delivered' && !form.receivedBy.value.trim()) { err.textContent = 'Enter who received the items.'; err.hidden = false; return; }
+        if (outcome === 'delivered' && !photo.value) { err.textContent = 'Take a photo of the delivery.'; err.hidden = false; photo.flag(); return; }
+        if (outcome === 'delivered' && sign.empty) { err.textContent = 'Ask the recipient to sign the D-note.'; err.hidden = false; sign.flag(); return; }
         if (outcome === 'failed' && !form.note.value.trim()) { err.textContent = 'Describe what happened.'; err.hidden = false; return; }
-        close({ outcome, receivedBy: form.receivedBy.value.trim() || null, note: form.note.value.trim() || null });
+        const delivered = outcome === 'delivered';
+        close({
+          outcome, receivedBy: form.receivedBy.value.trim() || null, note: form.note.value.trim() || null, photo: photo.value || null,
+          signature: delivered ? sign.dataUrl() : null, dnoteRef: delivered ? form.dnoteRef.value.trim() || null : null,
+        });
       });
     },
   });
@@ -69,7 +98,7 @@ export async function recordCollection(r) {
   if (!data) return null;
   try {
     const res = await api.post(`/api/requests/${r.id}/collect`, { version: r.version, ...data });
-    toast(`Collection recorded for ${r.ref}`);
+    toast(`Collection recorded for ${r.ref} · photo saved`);
     return res.request;
   } catch (err) { return handleError(err); }
 }
@@ -113,13 +142,15 @@ export async function render(el, ctx) {
     try { riders = (await api.get('/api/stats')).riders; } catch {}
   }
 
+  const writer = canWrite(ctx.user);
   const paint = () => {
     const { request: r, records, activity, overrides } = data;
     const isRider = r.rider?.id === ctx.user.id;
     const owner = r.requester.id === ctx.user.id;
-    const canEdit = (staff && ['pending', 'assigned'].includes(r.status)) || (owner && r.status === 'pending');
+    const canEdit = (writer && ['pending', 'assigned'].includes(r.status)) || (owner && r.status === 'pending' && ctx.user.role !== 'manager');
     const canCancel = canEdit;
-    const canAssign = staff && ['pending', 'assigned'].includes(r.status);
+    const canAssign = writer && ['pending', 'assigned'].includes(r.status);
+    const canAccept = ctx.user.role === 'rider' && r.status === 'pending' && !r.rider;
     const failed = r.dropoffs.filter((d) => d.status === 'failed').length;
     const done = r.dropoffs.filter((d) => d.status === 'delivered').length;
 
@@ -134,6 +165,8 @@ export async function render(el, ctx) {
         <p>Requested by ${r.requester.name} · ${fmtDateTime(r.createdAt)} · version ${r.version}</p>
       </div>
       <div class="row wrap">
+        ${ctx.user.role === 'manager' ? readOnlyChip() : ''}
+        ${canAccept ? html`<button class="btn primary lg" data-act="accept" data-busy=" Accepting…">${ic('hand2', 'sm')} Accept this job</button>` : ''}
         ${canCancel ? html`<button class="btn danger" data-act="cancel">${ic('x', 'sm')} Cancel</button>` : ''}
         ${canEdit ? html`<a class="btn" href="#/requests/${r.id}/edit">${ic('edit', 'sm')} Edit</a>` : ''}
         ${isRider && r.status === 'assigned' ? html`<button class="btn primary" data-act="collect">${ic('package', 'sm')} Record collection</button>` : ''}
@@ -142,6 +175,9 @@ export async function render(el, ctx) {
     </div>
 
     ${r.status === 'cancelled' ? html`<div class="alert err" style="margin-bottom:16px">${ic('x', 'sm')}<span><b>Cancelled.</b> ${r.cancelReason || 'No reason given.'}</span></div>` : ''}
+    ${isUpcoming(r) ? html`<div class="alert sched" style="margin-bottom:16px">${ic('calendar', 'sm')}<span><b>Scheduled pickup: ${new Date(r.scheduledAt).toLocaleString([], { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}</b> (${timeAgo(r.scheduledAt)}).
+      ${r.rider ? `${r.rider.name} is booked for it.` : 'A rider will be assigned before then.'}</span></div>` : ''}
+    ${canAccept ? html`<div class="alert info" style="margin-bottom:16px">${ic('hand2', 'sm')}<span><b>This job is open.</b> ${ctx.user.onShift ? 'Accept it to make it yours. Dispatch is told automatically.' : 'Switch on shift to accept it.'}</span></div>` : ''}
     ${failed ? html`<div class="alert warn" style="margin-bottom:16px">${ic('alert', 'sm')}<span><b>${failed} drop-off${failed > 1 ? 's' : ''} could not be delivered.</b> The rider can retry from this page.</span></div>` : ''}
 
     <div class="grid g-main-wide">
@@ -195,14 +231,19 @@ export async function render(el, ctx) {
         </section>` : ''}
 
         <section class="card">
-          <div class="card-head"><div><h2>Collection &amp; handover records</h2><p>Recorded by the assigned rider</p></div>
+          <div class="card-head"><div><h2>Collection &amp; handover records</h2><p>Photos and signed D-notes recorded by the assigned rider</p></div>
             <span class="gps-off">${ic('gpsOff', 'sm')} GPS verification not connected</span></div>
-          ${records.length ? html`<div class="table-wrap"><table class="table"><thead><tr><th>Record</th><th>By</th><th>Counterpart</th><th class="hide-sm">Note</th><th>When</th></tr></thead><tbody>
+          ${records.length ? html`<div class="table-wrap"><table class="table"><thead><tr><th>Record</th><th>By</th><th>Counterpart</th><th>Proof</th><th class="hide-sm">Note</th><th>When</th></tr></thead><tbody>
             ${records.map((x) => html`<tr>
               <td><span class="badge ${x.kind === 'collection' ? 's-collected' : x.outcome === 'failed' ? 's-failed' : 's-delivered'}">${ic(x.kind === 'collection' ? 'package' : 'hand')}${x.kind === 'collection' ? 'Collection' : `Drop-off ${x.dropoffSeq}${x.outcome === 'failed' ? ' · failed' : ''}`}</span></td>
               <td>${x.by}</td><td>${x.counterpart || '—'}${x.itemCount ? html` <span class="muted">· ${x.itemCount} items</span>` : ''}</td>
+              <td><div class="proofs">
+                ${x.photo ? html`<button type="button" class="proof-thumb" data-proof="${x.photo}" data-title="${x.kind === 'collection' ? 'Collection photo' : `Drop-off ${x.dropoffSeq} photo`}" aria-label="View photo"><img src="${x.photo}" alt="" loading="lazy"></button>` : ''}
+                ${x.signature ? html`<button type="button" class="proof-thumb sig" data-proof="${x.signature}" data-title="D-note signed by ${x.signedBy || x.counterpart}${x.dnoteRef ? ` · ${x.dnoteRef}` : ''}" aria-label="View D-note signature"><img src="${x.signature}" alt="" loading="lazy"></button>` : ''}
+                ${x.dnoteRef ? html`<span class="badge b-outline mono">${x.dnoteRef}</span>` : ''}
+                ${!x.photo && !x.signature && !x.dnoteRef ? html`<span class="muted">—</span>` : ''}</div></td>
               <td class="hide-sm muted">${x.note || '—'}</td><td class="nowrap muted">${fmtDateTime(x.createdAt)}</td></tr>`)}
-          </tbody></table></div>` : html`<div class="card-body muted">No records yet. The rider records the collection at pickup and a handover at each drop-off.</div>`}
+          </tbody></table></div>` : html`<div class="card-body muted">No records yet. At pickup the rider takes a photo of the items. At each drop-off they photograph the handover and the recipient signs the D-note.</div>`}
         </section>
       </div>
 
@@ -210,7 +251,7 @@ export async function render(el, ctx) {
         <section class="card">
           <div class="card-head"><h3>Rider</h3>${canAssign ? html`<button class="btn sm ghost" data-act="assign">${r.rider ? 'Change' : 'Assign'}</button>` : ''}</div>
           <div class="card-body">
-            ${r.rider ? html`<div class="row">${avatar(r.rider.name, 'lg')}<div class="grow"><b>${r.rider.name}</b>
+            ${r.rider ? html`<div class="row">${avatar(r.rider.name, 'lg')}<div class="grow"><b>${r.rider.name}</b> ${vehicleBadge(data.fuel?.estimate?.vehicle)}
                 <div class="muted" style="font-size:13px">${r.status === 'assigned' ? 'Heading to pickup' : r.status === 'collected' ? 'Carrying the items' : r.status === 'delivered' ? 'Delivery complete' : ''}</div></div>
                 ${r.rider.phone ? html`<a class="icon-btn" href="${telHref(r.rider.phone)}" aria-label="Call ${r.rider.name}">${ic('phone')}</a>` : ''}</div>
               ${['collected', 'delivered'].includes(r.status) ? html`<p class="muted" style="font-size:12.5px;margin-top:12px">${ic('lock', 'sm')} The rider is fixed once the items are collected.</p>` : ''}`
@@ -221,7 +262,7 @@ export async function render(el, ctx) {
         ${track.rider ? html`<p class="muted" style="font-size:12.5px;margin-top:-8px">${ic('gps', 'sm')} ${r.rider?.name} · GPS ${timeAgo(track.rider.recordedAt)}${track.rider.speed != null ? ` · ${Math.round(track.rider.speed)} km/h` : ''}</p>`
           : inProgress() ? html`<p class="faint" style="font-size:12.5px;margin-top:-8px">${ic('gpsOff', 'sm')} No live position — the rider shares GPS only while on shift with the app open.</p>` : ''}
         ${fuelCard(data.fuel, r)}
-        ${staff ? notificationsCard(data.notifications, r) : ''}
+        ${staff ? notificationsCard(data.notifications, r, writer) : ''}
         ${overrides.length ? html`
         <section class="card">
           <div class="card-head"><h3>${ic('shield', 'sm')} Recorded overrides</h3></div>
@@ -231,7 +272,7 @@ export async function render(el, ctx) {
               <div style="margin-top:6px;font-size:12px">${o.conflicts.map((c) => c.message).join(' ')}</div></div>`)}</div>
         </section>` : ''}
         <section class="card">
-          <div class="card-head"><h3>History</h3><span class="muted">${activity.length}</span></div>
+          <div class="card-head"><h3>History</h3><div class="row" style="gap:6px"><span class="muted">${activity.length}</span>${exportBtn('data-export-history', 'Export')}</div></div>
           <div class="timeline">${activity.map((a) => html`
             <div class="tl a-${a.action}"><span class="ic">${ic(activityIcon(a.action))}</span>
               <div><div class="msg">${a.message}</div><div class="when">${fmtDateTime(a.createdAt)}</div></div></div>`)}</div>
@@ -256,15 +297,15 @@ export async function render(el, ctx) {
       </div></section>`;
   }
 
-  function notificationsCard(list, r) {
+  function notificationsCard(list, r, writer) {
     const LABEL = { sent: 'Sent', delivered: 'Delivered', read: 'Read', failed: 'Failed', skipped: 'Not sent' };
     const TONE = { sent: 's-assigned', delivered: 's-delivered', read: 's-delivered', failed: 's-failed', skipped: 's-pending' };
-    const canResend = r.rider && ['assigned', 'collected'].includes(r.status);
+    const canResend = writer && r.rider && ['assigned', 'collected'].includes(r.status);
     return html`<section class="card">
       <div class="card-head"><h3>${ic('message', 'sm')} Rider notifications</h3>
         ${canResend ? html`<button class="btn sm ghost" data-act="notify" data-busy=" Sending…">${ic('send', 'sm')} Resend</button>` : ''}</div>
       ${list.length ? html`<div class="list">${list.map((n) => html`
-        <div class="list-item"><span class="avatar sm" style="background:${n.channel === 'whatsapp' ? '#25d366' : 'var(--surface-3)'};color:${n.channel === 'whatsapp' ? '#fff' : 'var(--muted)'}">${ic(n.channel === 'sms' ? 'phone' : 'message', 'sm')}</span>
+        <div class="list-item"><span class="avatar sm" style="background:${n.channel === 'whatsapp' ? '#25d366' : 'var(--surface-3)'};color:${n.channel === 'whatsapp' ? '#fff' : 'var(--muted)'}">${ic(n.channel === 'sms' ? 'phone' : n.channel === 'whatsapp' ? 'whatsapp' : 'message', 'sm')}</span>
           <div class="grow"><b>${n.channel === 'whatsapp' ? 'WhatsApp' : n.channel === 'sms' ? 'SMS' : 'No message'}</b> <span class="muted">to ${n.rider}${n.recipient ? ` · ${n.recipient}` : ''}</span>
             ${n.error ? html`<div class="req-sub error-text">${n.error}</div>` : ''}<div class="req-sub">${fmtDateTime(n.createdAt)}</div></div>
           <span class="badge ${TONE[n.status]}">${LABEL[n.status]}</span></div>`)}</div>`
@@ -287,6 +328,15 @@ export async function render(el, ctx) {
   const after = async (res) => { if (res) { await reload(); ctx.refreshBadges(); } };
 
   function wire(r) {
+    el.querySelector('[data-act=accept]')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
+      if (await acceptJob(r)) await after(true);
+    }));
+    el.querySelectorAll('[data-proof]').forEach((b) => b.addEventListener('click', () => openModal({
+      title: b.dataset.title, subtitle: `${r.ref} · ${r.title}`, iconName: b.classList.contains('sig') ? 'pen' : 'camera', wide: true,
+      body: html`<img class="proof-full ${b.classList.contains('sig') ? 'sig' : ''}" src="${b.dataset.proof}" alt="${b.dataset.title}">`,
+      actions: html`<a class="btn" href="${b.dataset.proof}" target="_blank" rel="noopener" download>${ic('download', 'sm')} Download</a><button class="btn primary" type="button" data-close>Close</button>`,
+    })));
+    el.querySelector('[data-export-history]')?.addEventListener('click', () => exportActivity(data.activity, `${r.ref}-history`, r.ref));
     el.querySelectorAll('[data-act=assign]').forEach((b) => b.addEventListener('click', async () => {
       const choice = await pickRiderDialog({ request: r, riders });
       if (!choice) return;

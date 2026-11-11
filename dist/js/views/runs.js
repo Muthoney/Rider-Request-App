@@ -1,10 +1,11 @@
 import { api } from '../api.js';
-import { html, ic, avatar, statusBadge, timeAgo, fmtTime, openModal, toast, busy, empty, confirmDialog } from '../ui.js';
+import { html, ic, avatar, statusBadge, timeAgo, fmtTime, openModal, toast, busy, empty, confirmDialog, canWrite, readOnlyChip } from '../ui.js';
 
 const RUN_STATUS = { planned: ['Planned', 's-pending'], active: ['On the road', 's-collected'], done: ['Finished', 's-delivered'] };
 
 export async function render(el, ctx) {
-  const staff = ['admin', 'manager', 'dispatcher'].includes(ctx.user.role);
+  // Managers see runs read-only; admins and dispatchers plan and manage them.
+  const staff = canWrite(ctx.user);
   let { runs } = await api.get('/api/runs');
   let tab = 'current';
 
@@ -50,7 +51,7 @@ export async function render(el, ctx) {
     el.innerHTML = String(html`
       <div class="page-head">
         <div><h1>Runs</h1><p>Group a rider's jobs into one trip and track it from start to finish.</p></div>
-        ${staff ? html`<button class="btn primary" id="new-run">${ic('plus', 'sm')} Plan a run</button>` : ''}
+        ${staff ? html`<button class="btn primary" id="new-run">${ic('plus', 'sm')} Plan a run</button>` : ctx.user.role === 'manager' ? readOnlyChip() : ''}
       </div>
       <div class="tabs" role="tablist">
         <button role="tab" data-t="current" class="${tab === 'current' ? 'on' : ''}">Planned &amp; active<span class="n">${current.length}</span></button>

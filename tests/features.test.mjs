@@ -1,7 +1,7 @@
 import { test, before, after, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { startServer, client, sampleRequest, ORIGIN } from './helpers.mjs';
+import { startServer, client, sampleRequest, ORIGIN, proof, PNG } from './helpers.mjs';
 import { lookupPlace, searchPlaces, isInKenya } from '../dist/js/kenya.js';
 import { quote, trackKm, routeKm, FUEL_DEFAULTS } from '../dist/js/fuel.js';
 import { createIntegrations, e164 } from '../server/integrations.mjs';
@@ -267,13 +267,15 @@ describe('fuel tracking and quotes', () => {
     assert.ok(routeKm([{ lat: -1.2864, lng: 36.8231 }, { lat: -1.2954, lng: 36.8231 }], 1.3) > 1.25);
   });
 
-  test('managers set the Kenyan pump price; dispatchers cannot', async () => {
+  test('dispatchers set the Kenyan pump price; managers only read it', async () => {
     const m = await as('manager@alpha.test');
     const d = await as('dispatch@alpha.test');
-    assert.equal((await d.get('/api/fuel/settings')).data.settings.fuelPrice, FUEL_DEFAULTS.fuelPrice);
-    assert.equal((await d.patch('/api/fuel/settings', { fuelPrice: 230 })).status, 403);
-    assert.equal((await m.patch('/api/fuel/settings', { fuelPrice: 5 })).status, 400);
-    const r = await m.patch('/api/fuel/settings', { fuelPrice: 230.5, kmPerLitre: 40, fuelPriceUpdatedAt: '2026-11-15' });
+    assert.equal((await m.get('/api/fuel/settings')).data.settings.fuelPrice, FUEL_DEFAULTS.fuelPrice);
+    const ro = await m.patch('/api/fuel/settings', { fuelPrice: 230 });
+    assert.equal(ro.status, 403);
+    assert.match(ro.data.message, /read-only/);
+    assert.equal((await d.patch('/api/fuel/settings', { fuelPrice: 5 })).status, 400);
+    const r = await d.patch('/api/fuel/settings', { fuelPrice: 230.5, kmPerLitre: 40, fuelPriceUpdatedAt: '2026-11-15' });
     assert.equal(r.status, 200);
     assert.equal(r.data.settings.fuelPrice, 230.5);
     assert.equal(r.data.settings.fuelPriceUpdatedAt, '2026-11-15');
@@ -281,7 +283,7 @@ describe('fuel tracking and quotes', () => {
     const q = await d.post('/api/fuel/quote', { km: 40, minutes: 60 });
     assert.equal(q.data.quote.litres, 1);
     assert.equal(q.data.quote.fuelCost, 230.5);
-    await m.patch('/api/fuel/settings', { fuelPrice: FUEL_DEFAULTS.fuelPrice, kmPerLitre: FUEL_DEFAULTS.kmPerLitre });
+    await d.patch('/api/fuel/settings', { fuelPrice: FUEL_DEFAULTS.fuelPrice, kmPerLitre: FUEL_DEFAULTS.kmPerLitre });
   });
 
   test('quotes from Kenyan stops, and request detail carries an estimate and, once delivered, the GPS trip cost', async () => {
@@ -308,8 +310,8 @@ describe('fuel tracking and quotes', () => {
         .run(rid, -1.2649 - i * 0.0045, 36.8028, new Date(base + i * 60e3).toISOString());
     }
     s.clock.offset = 6 * 60e3;
-    let cur = (await rider.post(`/api/requests/${req.id}/collect`, { version: request.version, collectedFrom: 'Reception' })).data.request;
-    cur = (await rider.post(`/api/requests/${req.id}/dropoffs/${cur.dropoffs[0].id}/handover`, { version: cur.version, receivedBy: 'Mercy' })).data.request;
+    let cur = (await rider.post(`/api/requests/${req.id}/collect`, { version: request.version, collectedFrom: 'Reception', photo: PNG })).data.request;
+    cur = (await rider.post(`/api/requests/${req.id}/dropoffs/${cur.dropoffs[0].id}/handover`, { version: cur.version, receivedBy: 'Mercy', ...proof() })).data.request;
     assert.equal(cur.status, 'delivered');
     const done = (await c.get(`/api/requests/${req.id}`)).data.fuel;
     assert.equal(done.actual.source, 'gps');

@@ -5,16 +5,19 @@ Internal delivery coordination for requesters, dispatchers, managers and motorcy
 ## Features
 
 - **Accounts & security**: email/password sign-in, forced replacement of temporary passwords (72-hour expiry, minimum 12 characters), HttpOnly/SameSite session cookies, CSRF tokens plus strict `Origin` checks, login rate limiting, and administrator account management.
-- **Requests**: ASAP or scheduled pickups, up to 12 ordered drop-offs, contacts per stop, item-handling flags and notes, and manual **WhatsApp message and map-pin import** that parses pickup, drop-offs, phones, pins and handling.
-- **Dispatch board**: drag-and-drop assignment to rider lanes, shift status and rider load. Priority ordering puts urgent work first, then Triangle, then Finance.
+- **Requests**: ASAP or **scheduled pickups for future dates** (up to 180 days ahead, with quick picks; a *Schedule* button on every page that can create requests and a *Scheduled* tab), up to 12 ordered drop-offs, contacts per stop, item-handling flags and notes, and manual **WhatsApp message and map-pin import** that parses pickup, drop-offs, phones, pins and handling.
+- **Dispatch board**: three distinct zones (waiting requests, available riders on shift, unavailable riders off shift), shown as tabs on phones. Drag-and-drop or tap to assign. Priority ordering puts urgent work first, then Triangle, then Finance; scheduled work is grouped under *Scheduled later*.
+- **Rider self-accept**: riders on shift see waiting jobs their designation allows (the same priority rules dispatch uses) and accept them. Dispatchers, and administrators with a recorded override, can still assign anyone.
 - **Priority rules**: Triangle and Finance work is reserved for designated riders, and designated riders are held while their reserved work waits. Substitutions need an acknowledged reason and are **recorded**.
 - **Integrity**: server-enforced company isolation, request ownership, a rider identity that is fixed after collection, and optimistic version checks on every write. A stale write returns `409` with the latest copy.
-- **Delivery records**: the assigned rider records the collection and a handover per drop-off (delivered or failed with a reason). GPS verification of handovers is explicitly marked *not connected*.
+- **Delivery records with proof**: a photo is required at pickup and at each delivered drop-off, and the recipient signs a D-note on screen (with an optional D-note number). Photos are downscaled on the phone and stored with the request. GPS verification of handovers is explicitly marked *not connected*.
+- **Password recovery**: *Forgot password?* sends a single-use link (30 minutes) by email (SMTP), falling back to WhatsApp and then Africa's Talking SMS at the account's mobile number.
+- **Excel export**: activity, request history, requests, shift log and fuel tables download as `.xlsx`.
 - **Shifts**: one on/off switch per rider (riders can switch themselves). Switching off adds the shift to the shift log.
 - **Rider notifications**: when a rider is assigned, they get a WhatsApp message (WhatsApp Cloud API) at the mobile number on their account. If WhatsApp rejects it, or later reports it undelivered through the webhook, an SMS goes out instead (Africa's Talking). Every attempt is shown on the request and can be re-sent.
 - **Live GPS tracking**: riders on shift share their phone's GPS position from the app. Dispatch sees everyone on a **Live map** (Google Maps, restricted to Kenya), and request pages show the rider's live position and track.
 - **Kenya-only places**: pins must be inside Kenya. Address search uses Google geocoding restricted to Kenya, or a built-in list of Kenyan landmarks, streets, areas and towns. Without a pin, the map places a stop from the landmark or street named in its address.
-- **Fuel & quotes**: quote = base fee + fuel (distance ÷ km/L × current pump price) + rider time. Fuel use per rider comes from GPS tracks, and each delivered trip shows its cost. The pump price defaults to the EPRA Nairobi Super Petrol price (KES 226.96/L, 15 Oct – 14 Nov 2026) and managers update it monthly.
+- **Fuel & quotes**: petrol and **electric motorcycles**. Each rider has a vehicle; quote = base fee + energy (km ÷ km/L × pump price, or km ÷ km/kWh × electricity price) + rider time, with a petrol-vs-electric comparison. Fuel use per rider comes from GPS tracks, and each delivered trip shows its cost. The pump price defaults to the EPRA Nairobi Super Petrol price (KES 226.96/L, 15 Oct – 14 Nov 2026) and managers update it monthly.
 - **Runs and activity**: batched runs per rider and an append-only activity history for each request and the company.
 - **Interface**: a responsive single-page app with light/dark themes, a mobile rider view, Google Maps (or an illustrative map when no key is set), and a dashboard with a 7-day chart.
 
@@ -22,7 +25,8 @@ Internal delivery coordination for requesters, dispatchers, managers and motorcy
 |---|---|
 | Requester | Create requests; edit or cancel their own before assignment; see only their own |
 | Rider | See assigned jobs, record collections and handovers, start/finish their runs, switch own shift on/off (shares live GPS while on) |
-| Dispatcher / Manager | Everything above for the whole company, plus assign riders, override rules with a reason, plan runs, switch riders on/off shift, live map, fuel report. Managers set fuel pricing |
+| Dispatcher | Everything above for the whole company, plus assign riders, override rules with a reason, plan runs, switch riders on/off shift, live map, fuel report and fuel pricing |
+| Manager | Read-only: sees everything a dispatcher sees but cannot change anything |
 | Administrator | Everything, plus create, edit and deactivate accounts and issue temporary passwords |
 
 ## Requirements
@@ -67,7 +71,7 @@ HTTP and non-Secure cookies are refused for anything except loopback origins. Pr
 npm test
 ```
 
-48 tests cover authentication, temporary-password replacement and expiry, CSRF/origin protection, roles and company isolation, reserved work and recorded overrides, stale updates, delivery progress and the fixed rider, runs, the shift switch, WhatsApp/SMS notifications and the webhook fallback, live GPS, Kenya-only pins and places, fuel quotes and tracking, static-file safety and WhatsApp parsing. The tests use an in-memory database, synthetic accounts and fake providers, so no real messages are sent.
+59 tests cover authentication, temporary-password replacement and expiry, CSRF/origin protection, roles and company isolation, reserved work and recorded overrides, stale updates, delivery progress and the fixed rider, runs, the shift switch, WhatsApp/SMS notifications and the webhook fallback, live GPS, Kenya-only pins and places, fuel quotes and tracking, static-file safety and WhatsApp parsing. The tests use an in-memory database, synthetic accounts and fake providers, so no real messages are sent.
 
 ## Layout
 
@@ -95,4 +99,4 @@ Google Maps, WhatsApp and SMS are switched on by environment variables. See `.en
 
 ## Still to connect
 
-WhatsApp OTP sign-in, Microsoft SSO, background GPS on Android (browsers pause location when the app is in the background), GPS-based handover validation, email recovery and off-server backups. See [deploy/remaining-work.txt](deploy/remaining-work.txt).
+WhatsApp OTP sign-in, Microsoft SSO, background GPS on Android (browsers pause location when the app is in the background), GPS-based handover validation and off-server backups. See [deploy/remaining-work.txt](deploy/remaining-work.txt).

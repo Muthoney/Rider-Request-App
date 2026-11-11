@@ -1,18 +1,25 @@
 // Fuel consumption and delivery quote maths, shared by the browser and the server. Pure module.
 
 /**
- * Defaults for a 125–150cc delivery motorcycle in Nairobi traffic. Every value can be changed on the
- * Fuel & quotes page. Fuel price: EPRA maximum pump price for Super Petrol in Nairobi, 15 Oct – 14 Nov 2026.
+ * Defaults for a 125–150cc delivery motorcycle in Nairobi traffic, and for an electric delivery
+ * motorcycle (charged or battery-swapped). Every value can be changed on the Fuel & quotes page.
+ * Fuel price: EPRA maximum pump price for Super Petrol in Nairobi, 15 Oct – 14 Nov 2026. The
+ * electricity price is a placeholder: set it to your charging tariff, or swap price ÷ battery kWh.
  */
 export const FUEL_DEFAULTS = {
   fuelType: 'petrol',
   fuelPrice: 226.96, // KES per litre
   fuelPriceUpdatedAt: '2026-10-15',
   kmPerLitre: 35,
+  electricityPrice: 25, // KES per kWh
+  kmPerKwh: 30, // electric motorcycle efficiency
+  defaultVehicle: 'petrol', // vehicle assumed for quotes before a rider is assigned
   timeRatePerHour: 200, // KES per hour of rider time
   baseFee: 100, // KES per trip
   roadFactor: 1.3, // straight-line → road distance
 };
+export const VEHICLES = ['petrol', 'electric'];
+export const VEHICLE_LABEL = { petrol: 'Petrol motorcycle', electric: 'Electric motorcycle' };
 export const AVG_SPEED_KMH = 22; // motorcycle average in city traffic
 export const MINUTES_PER_STOP = 5;
 
@@ -58,18 +65,33 @@ export function trackKm(points) {
 
 const round = (n, dp = 2) => Math.round(n * 10 ** dp) / 10 ** dp;
 
-/** Quote for a trip: base fee + fuel (distance ÷ efficiency × price) + rider time. */
-export function quote({ km, minutes }, settings = FUEL_DEFAULTS) {
+/** Energy use and cost for a distance on a petrol (litres) or electric (kWh) motorcycle. */
+export function energyFor(km, vehicle, settings = FUEL_DEFAULTS) {
+  const s = { ...FUEL_DEFAULTS, ...settings };
+  const electric = vehicle === 'electric';
+  const amount = Math.max(0, Number(km) || 0) / (electric ? s.kmPerKwh : s.kmPerLitre);
+  const unitPrice = electric ? s.electricityPrice : s.fuelPrice;
+  return { vehicle: electric ? 'electric' : 'petrol', unit: electric ? 'kWh' : 'L', amount, unitPrice, cost: amount * unitPrice,
+    efficiency: electric ? s.kmPerKwh : s.kmPerLitre };
+}
+
+/**
+ * Quote for a trip: base fee + energy (distance ÷ efficiency × price) + rider time. `vehicle` is
+ * 'petrol' (litres × pump price) or 'electric' (kWh × electricity price); it defaults to the
+ * company's default vehicle.
+ */
+export function quote({ km, minutes, vehicle }, settings = FUEL_DEFAULTS) {
   const s = { ...FUEL_DEFAULTS, ...settings };
   const distance = Math.max(0, Number(km) || 0);
   const mins = Math.max(0, Number(minutes) || 0);
-  const litres = distance / s.kmPerLitre;
-  const fuelCost = litres * s.fuelPrice;
+  const e = energyFor(distance, VEHICLES.includes(vehicle) ? vehicle : s.defaultVehicle, s);
   const timeCost = (mins / 60) * s.timeRatePerHour;
-  const subtotal = s.baseFee + fuelCost + timeCost;
+  const subtotal = s.baseFee + e.cost + timeCost;
   return {
-    km: round(distance, 1), minutes: Math.round(mins), litres: round(litres, 2),
-    fuelPrice: s.fuelPrice, fuelCost: round(fuelCost), timeCost: round(timeCost), baseFee: round(s.baseFee),
+    km: round(distance, 1), minutes: Math.round(mins), vehicle: e.vehicle, unit: e.unit, energy: round(e.amount, 2),
+    efficiency: e.efficiency, unitPrice: e.unitPrice,
+    litres: e.vehicle === 'petrol' ? round(e.amount, 2) : 0, kwh: e.vehicle === 'electric' ? round(e.amount, 2) : 0,
+    fuelPrice: s.fuelPrice, fuelCost: round(e.cost), timeCost: round(timeCost), baseFee: round(s.baseFee),
     total: Math.ceil(subtotal / 10) * 10, // rounded up to the next KES 10
   };
 }

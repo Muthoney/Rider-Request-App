@@ -1,7 +1,7 @@
 // Hosted entry point. Only the sign-in and password screens load up front; operational
 // views are imported after authentication and any required password replacement.
 import { api, setCsrf, onAuthLost } from './api.js';
-import { html, ic, avatar, ROLE_LABEL, toast } from './ui.js';
+import { html, ic, avatar, ROLE_LABEL, toast, canRequest, readOnlyChip } from './ui.js';
 
 const app = document.getElementById('app');
 const state = { user: null, cleanup: [], navToken: 0 };
@@ -26,13 +26,14 @@ export const isDark = () => document.documentElement.getAttribute('data-theme') 
 
 // ---------- routes ----------
 const STAFF = ['admin', 'manager', 'dispatcher'];
+const CREATORS = ['admin', 'dispatcher', 'requester']; // managers are read-only
 const ROUTES = [
   { path: '/', view: 'dashboard', roles: ['admin', 'manager', 'dispatcher', 'requester'] },
   { path: '/', view: 'jobs', roles: ['rider'] },
   { path: '/jobs', view: 'jobs', roles: ['rider'] },
   { path: '/requests', view: 'requests', roles: ['admin', 'manager', 'dispatcher', 'requester'] },
-  { path: '/requests/new', view: 'request-form', roles: ['admin', 'manager', 'dispatcher', 'requester'] },
-  { path: '/requests/:id/edit', view: 'request-form', roles: ['admin', 'manager', 'dispatcher', 'requester'] },
+  { path: '/requests/new', view: 'request-form', roles: CREATORS },
+  { path: '/requests/:id/edit', view: 'request-form', roles: CREATORS },
   { path: '/requests/:id', view: 'request-detail' },
   { path: '/dispatch', view: 'dispatch', roles: STAFF },
   { path: '/runs', view: 'runs', roles: [...STAFF, 'rider'] },
@@ -48,7 +49,8 @@ const NAV = [
   { href: '#/jobs', label: 'My jobs', icon: 'bike', roles: ['rider'], section: 'Overview', match: ['/', '/jobs'] },
   { href: '#/requests', label: 'Requests', icon: 'list', roles: STAFF, section: 'Overview' },
   { href: '#/requests', label: 'My requests', icon: 'list', roles: ['requester'], section: 'Overview' },
-  { href: '#/requests/new', label: 'New request', icon: 'plus', roles: ['admin', 'manager', 'dispatcher', 'requester'], section: 'Overview' },
+  { href: '#/requests/new', label: 'New request', icon: 'plus', roles: CREATORS, section: 'Overview' },
+  { href: '#/requests/new?schedule=1', label: 'Schedule delivery', icon: 'calendarPlus', roles: CREATORS, section: 'Overview', match: ['/requests/new?schedule'] },
   { href: '#/dispatch', label: 'Dispatch board', icon: 'board', roles: STAFF, section: 'Operations', badge: 'waiting' },
   { href: '#/runs', label: 'Runs', icon: 'route', roles: [...STAFF, 'rider'], section: 'Operations' },
   { href: '#/live', label: 'Live map', icon: 'gps', roles: STAFF, section: 'Operations' },
@@ -64,7 +66,8 @@ function matchRoute(path, role) {
   for (const r of ROUTES) {
     if (r.roles && !r.roles.includes(role)) continue;
     const keys = [];
-    const re = new RegExp('^' + r.path.replace(/:(\w+)/g, (_, k) => { keys.push(k); return '([^/]+)'; }) + '$');
+    // Ids are numeric, so "/requests/new" never falls through to the request page for roles that can't create.
+    const re = new RegExp('^' + r.path.replace(/:(\w+)/g, (_, k) => { keys.push(k); return k === 'id' ? '(\\d+)' : '([^/]+)'; }) + '$');
     const m = path.match(re);
     if (m) return { ...r, params: Object.fromEntries(keys.map((k, i) => [k, decodeURIComponent(m[i + 1])])) };
   }
@@ -103,7 +106,7 @@ function shellHtml(user) {
       <header class="topbar">
         <button class="icon-btn menu-btn" data-action="menu" aria-label="Open menu">${ic('menu')}</button>
         <a class="top-brand" href="#/"><span class="brand-mark">${ic('bike')}</span>Rider Requests</a>
-        ${user.role !== 'rider' ? html`
+        ${STAFF.includes(user.role) ? html`
         <form class="search" role="search" id="global-search">
           ${ic('search', 'sm')}
           <input name="q" placeholder="Search requests, addresses, people…" aria-label="Search requests" autocomplete="off">
@@ -112,7 +115,10 @@ function shellHtml(user) {
         <div class="grow"></div>
         ${user.role === 'rider' ? html`<a class="gps-chip" id="gps-chip" href="#/shifts" title="Location sharing">${ic('gpsOff', 'sm')}<span>Off shift</span></a>` : ''}
         <button class="icon-btn" data-action="theme" title="Toggle theme" aria-label="Toggle theme">${ic(isDark() ? 'sun' : 'moon')}</button>
-        ${user.role !== 'rider' ? html`<a class="btn primary sm" href="#/requests/new">${ic('plus', 'sm')}<span>New request</span></a>` : ''}
+        ${user.role === 'manager' ? readOnlyChip() : ''}
+        ${canRequest(user) ? html`
+          <a class="btn sm top-schedule" href="#/requests/new?schedule=1" title="Schedule a delivery for later">${ic('calendarPlus', 'sm')}<span>Schedule</span></a>
+          <a class="btn primary sm" href="#/requests/new">${ic('plus', 'sm')}<span>New request</span></a>` : ''}
       </header>
       <main class="content" id="view" tabindex="-1"></main>
     </div>
@@ -222,9 +228,16 @@ async function boot() {
     state.user = null;
   }
   if (!state.user) {
-    const { renderLogin } = await import('./views/login.js');
-    return renderLogin(app, { onSignedIn: (user, csrf) => { setCsrf(csrf); state.user = user; boot(); } });
+    const auth = await import('./views/login.js');
+    const signedIn = (user, csrf) => { setCsrf(csrf); state.user = user; boot(); };
+    const path = currentPath();
+    const toLogin = () => { history.replaceState(null, '', '#/'); auth.renderLogin(app, { onSignedIn: signedIn, onForgot: toForgot }); };
+    const toForgot = () => { history.replaceState(null, '', '#/forgot'); auth.renderForgot(app, { onBack: toLogin }); };
+    if (path === '/reset') return auth.renderReset(app, { token: query().get('token') || '', onDone: toLogin, onForgot: toForgot });
+    if (path === '/forgot') return toForgot();
+    return auth.renderLogin(app, { onSignedIn: signedIn, onForgot: toForgot });
   }
+  if (['/reset', '/forgot'].includes(currentPath())) history.replaceState(null, '', '#/');
   if (state.user.mustChange) {
     const { renderPasswordChange } = await import('./views/password.js');
     return renderPasswordChange(app, {

@@ -17,6 +17,8 @@
 | `WHATSAPP_TEMPLATE`, `WHATSAPP_TEMPLATE_LANG` | recommended | Approved template name and language (default `en`). Without a template, plain text is sent, which WhatsApp only delivers within 24 hours of the rider last messaging the business number. |
 | `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` | for fallback | Webhook verification token and Meta app secret (used to check `X-Hub-Signature-256`). |
 | `AT_USERNAME`, `AT_API_KEY`, `AT_SENDER_ID` | no | Africa's Talking SMS fallback. Use `AT_USERNAME=sandbox` for testing. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_SECURE` | for email recovery | Mail server for password-reset links. Port 587 uses STARTTLS (credentials are never sent unencrypted); 465 uses implicit TLS. |
+| `WHATSAPP_RESET_TEMPLATE` | no | Approved template with one body variable (the reset link). Without it, reset links go as plain WhatsApp text (24-hour window) or SMS. |
 
 ## Rider notifications
 
@@ -39,7 +41,7 @@ Riders share their position from the browser while they are **on shift**: at mos
 
 ## Fuel pricing
 
-Kenyan pump prices are set by EPRA on the 14th of each month. A manager or administrator updates **Fuel & quotes → Pricing** after each review. The page warns when the stored price predates the latest review. Quotes are calculated as base fee + fuel (km ÷ km/L × price) + rider time, rounded up to the next KES 10.
+Kenyan pump prices are set by EPRA on the 14th of each month. A dispatcher or administrator updates **Fuel & quotes → Pricing** after each review, along with the electricity price and km/kWh for electric motorcycles. The page warns when the stored price predates the latest review. Quotes are calculated as base fee + fuel (km ÷ km/L × price) + rider time, rounded up to the next KES 10.
 
 ## Reverse proxy
 
@@ -61,4 +63,8 @@ Stop the container, copy a backup over `/data/rider-requests.sqlite`, delete any
 
 ## Account recovery
 
-There is no email recovery yet. An administrator opens **Manage accounts → key icon** to issue a temporary password. This signs the person out of every session.
+*Forgot password?* on the sign-in page sends a single-use link valid for 30 minutes: by email first, then WhatsApp, then SMS to the account's mobile number. The answer never reveals whether an account exists, and requests are rate limited. Using the link signs the person out everywhere. In local development (loopback origin) with no provider configured, the link is printed in the server console. Administrators can still issue a temporary password from **Manage accounts → key icon**.
+
+## Roles
+
+Managers have read-only access. Dispatchers and administrators make changes, including fuel pricing. Riders accept waiting jobs that need no priority override; anything else is assigned by dispatch.

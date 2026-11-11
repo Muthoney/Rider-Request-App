@@ -1,5 +1,6 @@
 import { api } from '../api.js';
-import { html, ic, avatar, tagBadges, fmtTime, fmtDateTime, empty, busy } from '../ui.js';
+import { html, ic, avatar, tagBadges, fmtTime, fmtDateTime, empty, busy, canWrite, readOnlyChip, vehicleBadge, exportBtn, toast } from '../ui.js';
+import { downloadXlsx, stamp } from '../xlsx.js';
 import { setShift } from './actions.js';
 import { onTracker } from '../tracker.js';
 
@@ -8,6 +9,7 @@ const dur = (ms) => { const m = Math.max(0, Math.round(ms / 60e3)); return m < 6
 
 export async function render(el, ctx) {
   const staff = STAFF.includes(ctx.user.role);
+  const writer = canWrite(ctx.user);
   let riders = [];
   let log = [];
   let me = { ...ctx.user };
@@ -33,17 +35,17 @@ export async function render(el, ctx) {
     return ms;
   };
 
-  const toggle = (rd, big = false) => html`
+  const toggle = (rd, big = false) => (staff && !writer ? html`<span class="badge ${rd.onShift ? 's-delivered' : 'b-outline'} dot">${rd.onShift ? 'On shift' : 'Off shift'}</span>` : html`
     <button class="shift-toggle ${rd.onShift ? 'on' : ''} ${big ? 'big' : ''}" data-toggle="${rd.id}" aria-pressed="${rd.onShift ? 'true' : 'false'}"
       aria-label="${rd.name}: ${rd.onShift ? 'on shift, switch off' : 'off shift, switch on'}">
       <span class="knob">${ic('power', 'sm')}</span><span class="txt">${rd.onShift ? 'On shift' : 'Off shift'}</span>
-    </button>`;
+    </button>`);
 
   const card = (rd) => html`
     <section class="card rider-shift ${rd.onShift ? 'is-on' : ''}">
       <div class="row" style="gap:12px">
         ${avatar(rd.name)}
-        <div class="grow"><b>${rd.name}</b>
+        <div class="grow"><b>${rd.name}</b> ${vehicleBadge(rd.vehicle)}
           <div class="req-sub"><span class="${rd.onShift ? 'onshift' : 'offshift'}"></span>${rd.onShift ? `Since ${fmtTime(rd.onShiftSince)} · ${dur(Date.now() - new Date(rd.onShiftSince))}` : 'Not on shift'}</div>
           <div class="row" style="gap:4px;margin-top:4px">${tagBadges(rd.tags)}</div>
         </div>
@@ -64,8 +66,8 @@ export async function render(el, ctx) {
     if (staff) {
       el.innerHTML = String(html`
         <div class="page-head">
-          <div><h1>Shifts</h1><p>Switch riders on and off shift. Riders on shift show on the dispatch board and share their live GPS position.</p></div>
-          <div class="row wrap"><a class="btn" href="#/live">${ic('gps', 'sm')} Live map</a></div>
+          <div><h1>Shifts</h1><p>${writer ? 'Switch riders on and off shift. ' : ''}Riders on shift show as available on the dispatch board and share their live GPS position.</p></div>
+          <div class="row wrap">${writer ? '' : readOnlyChip()}<a class="btn" href="#/live">${ic('gps', 'sm')} Live map</a></div>
         </div>
         <div class="stats" style="grid-template-columns:repeat(3,minmax(0,1fr))">
           <div class="card stat"><div class="k"><span class="dot s-delivered">${ic('power', 'sm')}</span>On shift now</div><div class="v">${on.length}<small>of ${riders.length}</small></div></div>
@@ -74,7 +76,7 @@ export async function render(el, ctx) {
         </div>
         ${riders.length ? html`<div class="shift-grid">${riders.map(card)}</div>` : html`<div class="card">${empty('bike', 'No riders yet', 'Add rider accounts under Manage accounts.')}</div>`}
         <section class="card" style="margin-top:20px">
-          <div class="card-head"><div><h2>Shift log</h2><p>Completed shifts in the last 7 days</p></div></div>
+          <div class="card-head"><div><h2>Shift log</h2><p>Completed shifts in the last 7 days</p></div>${exportBtn()}</div>
           ${logTable()}
         </section>`);
     } else {
@@ -91,7 +93,7 @@ export async function render(el, ctx) {
           </div>
         </section>
         <section class="card" style="margin-top:20px">
-          <div class="card-head"><div><h2>My recent shifts</h2><p>Last 7 days</p></div></div>
+          <div class="card-head"><div><h2>My recent shifts</h2><p>Last 7 days</p></div>${exportBtn()}</div>
           ${logTable()}
         </section>`);
       trackerOff();
@@ -100,6 +102,20 @@ export async function render(el, ctx) {
         if (box) box.innerHTML = String(html`<span class="loc ${t.status}">${ic(t.status === 'live' ? 'gps' : 'gpsOff', 'sm')}${t.message}</span>`);
       });
     }
+    el.querySelector('[data-export]')?.addEventListener('click', () => {
+      if (!log.length) { toast('No shifts to export yet.', 'warn'); return; }
+      downloadXlsx(stamp('shift-log'), {
+        sheet: 'Shift log',
+        columns: [
+          { header: 'Rider', width: 22, value: (x) => x.rider.name },
+          { header: 'Started', width: 18, value: (x) => new Date(x.startsAt) },
+          { header: 'Ended', width: 18, value: (x) => new Date(x.endsAt) },
+          { header: 'Hours', width: 9, value: (x) => Math.round(((new Date(x.endsAt) - new Date(x.startsAt)) / 3600e3) * 100) / 100 },
+        ],
+        rows: log,
+      });
+      toast(`Exported ${log.length} shift${log.length === 1 ? '' : 's'} to Excel`);
+    });
     el.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', () => busy(b, async () => {
       const rd = riders.find((r) => r.id === +b.dataset.toggle);
       const res = await setShift(ctx, rd, !rd.onShift);

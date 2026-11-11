@@ -13,7 +13,7 @@
     "provision": "node --no-warnings=ExperimentalWarning server/provision.mjs",
     "provision:sample": "node --no-warnings=ExperimentalWarning scripts/local.mjs provision --sample",
     "backup": "node --no-warnings=ExperimentalWarning server/backup.mjs",
-    "test": "node --no-warnings=ExperimentalWarning --test tests/server.test.mjs tests/whatsapp.test.mjs tests/features.test.mjs",
+    "test": "node --no-warnings=ExperimentalWarning --test tests/server.test.mjs tests/whatsapp.test.mjs tests/features.test.mjs tests/workflow.test.mjs",
     "provision:local": "node --no-warnings=ExperimentalWarning scripts/local.mjs provision",
     "backup:local": "node --no-warnings=ExperimentalWarning scripts/local.mjs backup"
   }

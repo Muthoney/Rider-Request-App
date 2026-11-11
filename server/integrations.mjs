@@ -1,8 +1,10 @@
-// External providers: Google Maps (geocoding, routes), WhatsApp Cloud API and Africa's Talking SMS.
-// Each one is optional. When its environment variables are missing, `configured` is false and the
-// app falls back (Kenyan place list for geocoding, straight-line estimates for routes, SMS for
-// WhatsApp, and "skipped" notification records when nothing is configured).
-import { createHmac, timingSafeEqual } from 'node:crypto';
+// External providers: Google Maps (geocoding, routes), WhatsApp Cloud API, Africa's Talking SMS and
+// SMTP email. Each one is optional. When its environment variables are missing, `configured` is false
+// and the app falls back (Kenyan place list for geocoding, straight-line estimates for routes, SMS for
+// WhatsApp, WhatsApp then SMS for email, and "skipped" notification records when nothing is configured).
+import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
+import net from 'node:net';
+import tls from 'node:tls';
 import { isInKenya } from '../dist/js/kenya.js';
 
 const TIMEOUT_MS = 8000;
@@ -78,14 +80,19 @@ export function createIntegrations(env = process.env, { fetchImpl = globalThis.f
     template: env.WHATSAPP_TEMPLATE || '',
     verifyToken: env.WHATSAPP_VERIFY_TOKEN || '',
     appSecret: env.WHATSAPP_APP_SECRET || '',
-    /** Sends an approved template (needed outside the 24-hour window) or, without one, plain text. */
-    async send({ to, text, params }) {
+    /** Template for password-recovery links (one body variable: the link). Optional. */
+    resetTemplate: env.WHATSAPP_RESET_TEMPLATE || '',
+    /**
+     * Sends an approved template (needed outside the 24-hour window) or, without one, plain text.
+     * `template` defaults to the job-notification template; pass '' to force plain text.
+     */
+    async send({ to, text, params = [], template = whatsapp.template }) {
       const recipient = to.replace(/^\+/, '');
-      const payload = whatsapp.template
+      const payload = template
         ? {
           messaging_product: 'whatsapp', to: recipient, type: 'template',
           template: {
-            name: whatsapp.template, language: { code: env.WHATSAPP_TEMPLATE_LANG || 'en' },
+            name: template, language: { code: env.WHATSAPP_TEMPLATE_LANG || 'en' },
             components: [{ type: 'body', parameters: params.map((p) => ({ type: 'text', text: clean(p) })) }],
           },
         }
@@ -124,10 +131,109 @@ export function createIntegrations(env = process.env, { fetchImpl = globalThis.f
     },
   };
 
+  // ---------- SMTP email (password recovery) ----------
+  const smtpPort = Number(env.SMTP_PORT || 587);
+  const email = {
+    configured: !!(env.SMTP_HOST && env.SMTP_FROM),
+    async send({ to, subject, text }) {
+      return smtpSend({
+        host: env.SMTP_HOST, port: smtpPort, secure: env.SMTP_SECURE ? env.SMTP_SECURE === 'true' : smtpPort === 465,
+        user: env.SMTP_USER || '', pass: env.SMTP_PASS || '', from: env.SMTP_FROM, name: env.SMTP_HELO || 'rider-requests',
+      }, { to, subject, text });
+    },
+  };
+
   return {
     maps: { browserKey: mapsBrowserKey, mapId: env.GOOGLE_MAPS_MAP_ID || '' },
-    geocode, routes, whatsapp, sms,
+    geocode, routes, whatsapp, sms, email,
   };
+}
+
+// ---------- minimal SMTP client (STARTTLS or implicit TLS, AUTH PLAIN/LOGIN) ----------
+const oneLine = (s) => String(s ?? '').replace(/[\r\n]+/g, ' ').trim();
+const addressOf = (s) => (/<([^>]+)>/.exec(s)?.[1] || s).trim();
+const b64 = (s) => Buffer.from(String(s), 'utf8').toString('base64');
+const wrap76 = (s) => s.replace(/.{1,76}/g, '$&\r\n');
+
+/** Sends one plain-text email. Resolves with the server's queue reply; rejects on any SMTP error. */
+export async function smtpSend(cfg, { to, subject, text }) {
+  const rcpt = addressOf(oneLine(to));
+  const from = oneLine(cfg.from);
+  if (!/^[^\s@<>]+@[^\s@<>]+$/.test(rcpt)) throw new Error('Invalid recipient address');
+  let socket;
+  let buf = '';
+  let pending = null;
+  let failure = null;
+  const onData = (d) => { buf += d; pump(); };
+  const onError = (e) => { failure = e; if (pending) { const p = pending; pending = null; p.reject(e); } };
+  const attach = (s) => { socket = s; s.setEncoding('utf8'); s.on('data', onData); s.on('error', onError); };
+  function pump() {
+    if (!pending) return;
+    const m = /^(?:\d{3}-[^\r\n]*\r?\n)*(\d{3})(?: [^\r\n]*)?\r?\n/.exec(buf);
+    if (!m) return;
+    buf = buf.slice(m[0].length);
+    const p = pending; pending = null;
+    p.resolve({ code: Number(m[1]), text: m[0] });
+  }
+  const read = () => new Promise((resolve, reject) => {
+    if (failure) return reject(failure);
+    pending = { resolve, reject };
+    pump();
+  });
+  const cmd = async (line, ok, secret = false) => {
+    if (line != null) socket.write(`${line}\r\n`);
+    const r = await read();
+    if (!ok.includes(r.code)) throw new Error(`SMTP ${secret ? 'authentication' : (line || 'greeting').split(' ')[0]} failed: ${r.code} ${oneLine(r.text).slice(0, 160)}`);
+    return r;
+  };
+  const connect = () => new Promise((resolve, reject) => {
+    const s = cfg.secure ? tls.connect({ host: cfg.host, port: cfg.port, servername: cfg.host }) : net.connect({ host: cfg.host, port: cfg.port });
+    s.once(cfg.secure ? 'secureConnect' : 'connect', () => resolve(s));
+    s.once('error', reject);
+  });
+  const timer = setTimeout(() => onError(new Error('SMTP timed out')), 20000);
+  try {
+    attach(await connect());
+    socket.setTimeout(20000, () => onError(new Error('SMTP timed out')));
+    await cmd(null, [220]);
+    let ehlo = await cmd(`EHLO ${cfg.name}`, [250]);
+    if (!cfg.secure && /STARTTLS/i.test(ehlo.text)) {
+      await cmd('STARTTLS', [220]);
+      socket.removeListener('data', onData);
+      const upgraded = await new Promise((resolve, reject) => {
+        const t = tls.connect({ socket, servername: cfg.host }, () => resolve(t));
+        t.once('error', reject);
+      });
+      buf = '';
+      attach(upgraded);
+      ehlo = await cmd(`EHLO ${cfg.name}`, [250]);
+    } else if (!cfg.secure && cfg.user) {
+      throw new Error('SMTP server does not offer STARTTLS; refusing to send credentials in clear text');
+    }
+    if (cfg.user) {
+      if (/AUTH[^\r\n]*PLAIN/i.test(ehlo.text)) await cmd(`AUTH PLAIN ${b64(`\0${cfg.user}\0${cfg.pass}`)}`, [235], true);
+      else {
+        await cmd('AUTH LOGIN', [334]);
+        await cmd(b64(cfg.user), [334], true);
+        await cmd(b64(cfg.pass), [235], true);
+      }
+    }
+    await cmd(`MAIL FROM:<${addressOf(from)}>`, [250]);
+    await cmd(`RCPT TO:<${rcpt}>`, [250, 251]);
+    await cmd('DATA', [354]);
+    const domain = addressOf(from).split('@')[1] || 'localhost';
+    const message = [
+      `From: ${from}`, `To: ${rcpt}`, `Subject: =?UTF-8?B?${b64(oneLine(subject))}?=`, `Date: ${new Date().toUTCString()}`,
+      `Message-ID: <${randomBytes(12).toString('hex')}@${domain}>`, 'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '', wrap76(b64(text)),
+    ].join('\r\n');
+    const reply = await cmd(`${message}\r\n.`, [250]);
+    socket.write('QUIT\r\n');
+    return { id: oneLine(reply.text).slice(4, 120) };
+  } finally {
+    clearTimeout(timer);
+    socket?.end();
+  }
 }
 
 // WhatsApp template parameters may not contain new lines, tabs or more than four spaces in a row.

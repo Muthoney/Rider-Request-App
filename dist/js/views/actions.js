@@ -1,6 +1,6 @@
 // Shared request actions: assignment with priority-rule overrides, stale-version handling.
 import { api } from '../api.js';
-import { html, ic, openModal, toast, avatar, tagBadges } from '../ui.js';
+import { html, ic, openModal, toast, avatar, tagBadges, vehicleBadge, fmtTime } from '../ui.js';
 
 /** Ask the dispatcher to acknowledge a priority conflict and give a reason. Resolves to reason or null. */
 export function overrideDialog({ conflicts, rider, request }) {
@@ -63,6 +63,18 @@ export async function setShift(ctx, rider, onShift) {
   } catch (err) { toast(err.message, 'err'); return null; }
 }
 
+/** A rider takes a waiting job. Returns the updated request, or null. */
+export async function acceptJob(request) {
+  try {
+    const res = await api.post(`/api/requests/${request.id}/accept`, { version: request.version });
+    toast(`${request.ref} is yours. Head to the pickup.`);
+    return res.request;
+  } catch (err) {
+    toast(err.message, err.code === 'taken' || err.code === 'off_shift' ? 'warn' : 'err');
+    return null;
+  }
+}
+
 export function handleError(err) {
   if (err.code === 'stale') {
     toast('Someone else just updated this request. Showing the latest version.', 'warn');
@@ -78,13 +90,18 @@ export function pickRiderDialog({ request, riders }) {
     title: request.rider ? 'Reassign rider' : 'Assign a rider',
     subtitle: `${request.ref} · ${request.title}`,
     iconName: 'bike',
-    body: html`<div class="pick-list">${riders.map((r) => html`
-      <label class="pick">
-        <input type="radio" name="rider" value="${r.id}" ${request.rider?.id === r.id ? 'checked' : ''}>
-        ${avatar(r.name, 'sm')}
-        <div class="grow"><b>${r.name}</b><div class="req-sub"><span class="${r.onShift ? 'onshift' : 'offshift'}"></span>${r.onShift ? 'On shift' : 'Off shift'} · ${r.openJobs ?? 0} open</div></div>
-        ${tagBadges(r.tags)}
-      </label>`)}</div>`,
+    body: html`<div class="pick-list">
+      ${[['Available · on shift', riders.filter((r) => r.onShift).sort((a, b) => (a.openJobs ?? 0) - (b.openJobs ?? 0)), true],
+        ['Unavailable · off shift', riders.filter((r) => !r.onShift), false]].map(([label, list, on]) => (list.length ? html`
+        <div class="pick-group ${on ? 'on' : 'off'}">${on ? html`<span class="onshift"></span>` : html`<span class="offshift"></span>`}${label}<span class="n">${list.length}</span></div>
+        ${list.map((r) => html`
+        <label class="pick ${on ? 'avail' : 'unavail'}">
+          <input type="radio" name="rider" value="${r.id}" ${request.rider?.id === r.id ? 'checked' : ''}>
+          ${avatar(r.name, 'sm')}
+          <div class="grow"><b>${r.name}</b> ${vehicleBadge(r.vehicle)}<div class="req-sub">${on ? `On shift since ${fmtTime(r.onShiftSince)}` : 'Off shift'} · ${r.openJobs ?? 0} open</div></div>
+          ${tagBadges(r.tags)}
+        </label>`)}` : ''))}
+      </div>`,
     actions: html`${request.rider ? html`<button type="button" class="btn danger" data-unassign>Unassign</button><span class="grow"></span>` : ''}
       <button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">Assign</button>`,
     onMount: ({ form, close }) => {

@@ -2,6 +2,9 @@
 
 export const ROLES = ['admin', 'manager', 'dispatcher', 'requester', 'rider'];
 export const STAFF = ['admin', 'manager', 'dispatcher'];
+/** Staff who may change things. Managers have read-only access to operations. */
+export const WRITE_STAFF = ['admin', 'dispatcher'];
+export const VEHICLES = ['petrol', 'electric'];
 export const CATEGORIES = ['general', 'triangle', 'finance'];
 export const RESERVED = ['triangle', 'finance'];
 export const RIDER_TAGS = ['triangle', 'finance'];
@@ -9,6 +12,7 @@ export const HANDLING = ['fragile', 'keep_upright', 'confidential', 'signature',
 export const CATEGORY_LABEL = { general: 'General', triangle: 'Triangle', finance: 'Finance' };
 
 export const isStaff = (user) => STAFF.includes(user.role);
+export const canWrite = (user) => WRITE_STAFF.includes(user.role);
 
 /**
  * Returns the list of priority-rule conflicts for assigning `request` to `rider`.

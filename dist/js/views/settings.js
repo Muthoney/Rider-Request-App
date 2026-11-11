@@ -5,14 +5,14 @@ import { getConfig } from '../config.js';
 
 function integrations(c) {
   return [
-    ['message', 'WhatsApp job notifications', c.notifications.whatsapp, 'Riders get a WhatsApp message when assigned.', 'Set WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID.'],
-    ['phone', "SMS fallback (Africa's Talking)", c.notifications.sms, 'Sent when WhatsApp fails or is not set up.', 'Set AT_USERNAME and AT_API_KEY.'],
+    ['whatsapp', 'WhatsApp job notifications', c.notifications.whatsapp, 'Riders get a WhatsApp message when assigned. Also the first fallback for password recovery.', 'Set WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID.'],
+    ['phone', "SMS fallback (Africa's Talking)", c.notifications.sms, 'Sent when WhatsApp fails or is not set up, for job notifications and password recovery.', 'Set AT_USERNAME and AT_API_KEY.'],
+    ['mail', 'Email password recovery', !!c.email, 'Reset links are emailed; WhatsApp, then SMS, are used if email fails.', 'Set SMTP_HOST and SMTP_FROM. Until then, reset links go by WhatsApp or SMS when those are set up.'],
     ['gps', 'Google Maps & live rider positions', !!c.maps.browserKey, 'Live map and request maps use Google Maps (Kenya).', 'Riders still share GPS; maps are drawn as illustrations until GOOGLE_MAPS_BROWSER_KEY is set.'],
     ['search', 'Kenya address search', c.geocoder === 'google', 'Google geocoding, limited to Kenya.', 'Using the built-in list of Kenyan landmarks, streets and areas.'],
     ['route', 'Road distances for quotes', c.routing === 'google', 'Google Routes API.', 'Straight-line distance × road factor.'],
     ['shield', 'Microsoft SSO', false, '', 'Sign-in uses email and password.'],
     ['gpsOff', 'GPS-verified handovers', false, '', 'Collections and handovers are recorded without a location check.'],
-    ['doc', 'Email password recovery', false, '', 'Administrators issue temporary passwords instead.'],
   ];
 }
 

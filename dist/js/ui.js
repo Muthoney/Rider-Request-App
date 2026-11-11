@@ -42,6 +42,25 @@ export const HANDLING = {
 };
 export const ROLE_LABEL = { admin: 'Administrator', manager: 'Manager', dispatcher: 'Dispatcher', requester: 'Requester', rider: 'Rider' };
 
+// ---------- permissions (mirrors server/rules.mjs) ----------
+export const STAFF = ['admin', 'manager', 'dispatcher'];
+/** Staff who may change things; managers have read-only access. */
+export const WRITERS = ['admin', 'dispatcher'];
+export const isStaffUser = (u) => STAFF.includes(u?.role);
+export const canWrite = (u) => WRITERS.includes(u?.role);
+/** Who can create delivery requests. */
+export const canRequest = (u) => ['admin', 'dispatcher', 'requester'].includes(u?.role);
+export const readOnlyChip = () => html`<span class="badge b-readonly" title="Managers can view everything but not change it">${ic('eye')}Read-only</span>`;
+
+// ---------- scheduling ----------
+/** Pickups more than this far ahead are "scheduled later" rather than due now. */
+export const SCHEDULE_LEAD_MS = 2 * 3600e3;
+export const isUpcoming = (r) => !!r.scheduledAt && ['pending', 'assigned'].includes(r.status) && new Date(r.scheduledAt) > Date.now();
+export const isScheduledLater = (r) => !!r.scheduledAt && new Date(r.scheduledAt) - Date.now() > SCHEDULE_LEAD_MS;
+export const scheduleBadge = (r) => (isUpcoming(r) ? html`<span class="badge s-scheduled" title="Scheduled pickup">${ic('calendar')}${fmtDateTime(r.scheduledAt)}</span>` : '');
+export const vehicleBadge = (v) => (v === 'electric' ? html`<span class="badge v-electric" title="Electric motorcycle">${ic('zap')}Electric</span>` : '');
+export const exportBtn = (attr = 'data-export', label = 'Export to Excel') => html`<button type="button" class="btn sm export-btn" ${raw(attr)} title="Download as an Excel workbook (.xlsx)">${ic('download', 'sm')}<span>${label}</span></button>`;
+
 export const statusBadge = (s) => html`<span class="badge dot s-${s}">${STATUS[s]?.label || s}</span>`;
 export const categoryBadge = (c) => c === 'general' ? '' : html`<span class="badge c-${c}">${ic(CATEGORY[c].icon)}${CATEGORY[c].label}</span>`;
 export const urgentBadge = (p) => p === 'urgent' ? html`<span class="badge p-urgent">${ic('flag')}Urgent</span>` : '';

@@ -1,6 +1,6 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { startServer, client, sampleRequest, PASSWORD } from './helpers.mjs';
+import { startServer, client, sampleRequest, PASSWORD, proof, PNG } from './helpers.mjs';
 
 let s;
 before(async () => {
@@ -269,7 +269,11 @@ describe('delivery progress', () => {
     const rider = await as('rider.gen@alpha.test');
     const early = await rider.post(`/api/requests/${r.id}/dropoffs/${cur.dropoffs[0].id}/handover`, { version: cur.version, receivedBy: 'Mercy' });
     assert.equal(early.status, 409);
-    const col = await rider.post(`/api/requests/${r.id}/collect`, { version: cur.version, collectedFrom: 'Reception', itemCount: 2 });
+    const noPhoto = await rider.post(`/api/requests/${r.id}/collect`, { version: cur.version, collectedFrom: 'Reception', itemCount: 2 });
+    assert.equal(noPhoto.status, 400, 'a collection needs a photo');
+    const fake = await rider.post(`/api/requests/${r.id}/collect`, { version: cur.version, collectedFrom: 'Reception', photo: 'data:image/png;base64,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' });
+    assert.equal(fake.status, 400, 'bytes must really be an image');
+    const col = await rider.post(`/api/requests/${r.id}/collect`, { version: cur.version, collectedFrom: 'Reception', itemCount: 2, photo: PNG });
     assert.equal(col.status, 200);
     cur = col.data.request;
     assert.equal(cur.status, 'collected');
@@ -282,10 +286,12 @@ describe('delivery progress', () => {
     assert.equal(failed.status, 200);
     cur = failed.data.request;
     assert.equal(cur.status, 'collected');
-    const h1 = await rider.post(`/api/requests/${r.id}/dropoffs/${cur.dropoffs[0].id}/handover`, { version: cur.version, receivedBy: 'Mercy' });
+    const unsigned = await rider.post(`/api/requests/${r.id}/dropoffs/${cur.dropoffs[0].id}/handover`, { version: cur.version, receivedBy: 'Mercy', photo: PNG });
+    assert.equal(unsigned.status, 400, 'a delivered handover needs the D-note signature');
+    const h1 = await rider.post(`/api/requests/${r.id}/dropoffs/${cur.dropoffs[0].id}/handover`, { version: cur.version, receivedBy: 'Mercy', dnoteRef: 'DN-1001', ...proof() });
     cur = h1.data.request;
     assert.equal(h1.data.remaining, 1);
-    const h2 = await rider.post(`/api/requests/${r.id}/dropoffs/${cur.dropoffs[1].id}/handover`, { version: cur.version, receivedBy: 'Desk' });
+    const h2 = await rider.post(`/api/requests/${r.id}/dropoffs/${cur.dropoffs[1].id}/handover`, { version: cur.version, receivedBy: 'Desk', ...proof() });
     assert.equal(h2.status, 200);
     assert.equal(h2.data.request.status, 'delivered');
     assert.ok(h2.data.request.deliveredAt);
@@ -293,6 +299,13 @@ describe('delivery progress', () => {
     const detail = await d.get(`/api/requests/${r.id}`);
     assert.equal(detail.data.records.length, 4);
     assert.ok(detail.data.records.every((x) => x.gpsStatus === 'unconnected'));
+    const signed = detail.data.records.find((x) => x.dnoteRef === 'DN-1001');
+    assert.equal(signed.signedBy, 'Mercy');
+    assert.ok(signed.photo && signed.signature);
+    const img = await fetch(s.base + signed.photo, { headers: { Cookie: d.cookie } });
+    assert.equal(img.status, 200);
+    assert.equal(img.headers.get('content-type'), 'image/png');
+    assert.equal((await other.get(signed.photo)).status, 404, 'other riders cannot open the proof');
   });
 });
 

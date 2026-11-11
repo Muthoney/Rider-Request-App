@@ -61,6 +61,11 @@ export function client(base) {
   };
 }
 
+/** A real 1×1 PNG, used as proof photo and D-note signature in tests. */
+export const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+/** Proof fields for a collection or a delivered handover. */
+export const proof = (over = {}) => ({ photo: PNG, signature: PNG, ...over });
+
 export const sampleRequest = (over = {}) => ({
   title: 'Signed contracts',
   category: 'general',

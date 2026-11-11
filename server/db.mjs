@@ -73,6 +73,17 @@ CREATE TABLE IF NOT EXISTS dropoffs (
   received_by TEXT,
   note TEXT
 );
+-- Extra pickup stops (the first pickup lives on the request row as seq 1; these are seq 2+).
+CREATE TABLE IF NOT EXISTS pickups (
+  id INTEGER PRIMARY KEY,
+  request_id INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  address TEXT NOT NULL,
+  contact_name TEXT,
+  contact_phone TEXT,
+  lat REAL,
+  lng REAL
+);
 CREATE TABLE IF NOT EXISTS records (
   id INTEGER PRIMARY KEY,
   request_id INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
@@ -171,9 +182,32 @@ CREATE TABLE IF NOT EXISTS company_settings (
   road_factor REAL NOT NULL,
   updated_by INTEGER
 );
+CREATE TABLE IF NOT EXISTS attachments (
+  id INTEGER PRIMARY KEY,
+  company_id INTEGER NOT NULL,
+  request_id INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('photo','signature')),
+  stage TEXT NOT NULL CHECK (stage IN ('collection','handover')),
+  mime TEXT NOT NULL,
+  data BLOB NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS password_resets (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  channel TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_requests_company ON requests(company_id, status);
+CREATE INDEX IF NOT EXISTS idx_attachments_request ON attachments(request_id);
+CREATE INDEX IF NOT EXISTS idx_resets_user ON password_resets(user_id);
 CREATE INDEX IF NOT EXISTS idx_requests_rider ON requests(rider_id);
 CREATE INDEX IF NOT EXISTS idx_dropoffs_request ON dropoffs(request_id, seq);
+CREATE INDEX IF NOT EXISTS idx_pickups_request ON pickups(request_id, seq);
 CREATE INDEX IF NOT EXISTS idx_activity_company ON activity(company_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_shifts_company ON shifts(company_id, starts_at);
 CREATE INDEX IF NOT EXISTS idx_points_rider ON location_points(rider_id, recorded_at);
@@ -183,9 +217,23 @@ CREATE INDEX IF NOT EXISTS idx_notifications_provider ON notifications(provider_
 
 /** Additive migrations for databases created by earlier versions. */
 function migrate(db) {
-  const cols = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
-  if (!cols.has('on_shift')) db.exec('ALTER TABLE users ADD COLUMN on_shift INTEGER NOT NULL DEFAULT 0');
-  if (!cols.has('on_shift_since')) db.exec('ALTER TABLE users ADD COLUMN on_shift_since TEXT');
+  const cols = (table) => new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
+  const add = (table, col, def) => { if (!cols(table).has(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); };
+  add('users', 'on_shift', 'INTEGER NOT NULL DEFAULT 0');
+  add('users', 'on_shift_since', 'TEXT');
+  // Riders ride petrol or electric motorcycles; fuel and quotes follow the rider's vehicle.
+  add('users', 'vehicle', "TEXT NOT NULL DEFAULT 'petrol'");
+  // Proof of collection / delivery: a photo, a signed delivery note (D-note) and its number.
+  add('records', 'photo_id', 'INTEGER REFERENCES attachments(id)');
+  add('records', 'signature_id', 'INTEGER REFERENCES attachments(id)');
+  add('records', 'dnote_ref', 'TEXT');
+  add('records', 'signed_by', 'TEXT');
+  // Which pickup a collection record is for (1 = the request's first pickup; NULL on older rows means 1).
+  add('records', 'pickup_seq', 'INTEGER');
+  // Electric motorcycles: energy price per kWh, efficiency, and which vehicle quotes assume.
+  add('company_settings', 'electricity_price', 'REAL');
+  add('company_settings', 'km_per_kwh', 'REAL');
+  add('company_settings', 'default_vehicle', 'TEXT');
   // "Keep cold" handling was retired; strip it from stored requests.
   db.exec(`UPDATE requests SET handling = (SELECT json_group_array(value) FROM json_each(requests.handling) WHERE value != 'cold')
     WHERE EXISTS (SELECT 1 FROM json_each(requests.handling) WHERE value = 'cold')`);

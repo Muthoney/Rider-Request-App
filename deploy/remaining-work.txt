@@ -4,6 +4,8 @@ Launch checklist — remaining work
 Built, needs keys (see .env.example and OPERATIONS.md):
 [ ] WhatsApp Cloud API: rider job notifications. Create and approve the utility template, then set the webhook
 [ ] Africa's Talking SMS fallback: register a sender ID
+[ ] SMTP for password-recovery email (SMTP_HOST, SMTP_FROM, credentials); optional WHATSAPP_RESET_TEMPLATE
+[ ] Set the electricity price / km per kWh and each rider's vehicle if the fleet has electric motorcycles
 [ ] Google Maps: browser key (Maps JavaScript API) and server key (Geocoding API + Routes API)
 [ ] Set the real fuel pricing (Fuel & quotes) and update it after each EPRA review (14th of the month)
 
@@ -13,7 +15,6 @@ Not connected (UI states this wherever relevant):
 [ ] Android background tracking: browser GPS pauses when the app is in the background; a native/PWA wrapper is needed for screen-off tracking
 [ ] GPS-based handover validation (records carry gps_status = "unconnected")
 [ ] Route optimisation (multi-stop ordering)
-[ ] Email-based password recovery
 [ ] Off-server backup copy + rehearsed restore
 
 Before go-live:
