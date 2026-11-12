@@ -9,6 +9,9 @@ import { parseWhatsApp } from '../dist/js/whatsapp.js';
 import { isInKenya, lookupPlace, searchPlaces, KENYA_BOUNDS } from '../dist/js/kenya.js';
 import { FUEL_DEFAULTS, quote, routeKm, estimateMinutes, trackKm, energyFor } from '../dist/js/fuel.js';
 import { noIntegrations, e164 } from './integrations.mjs';
+import { createHub } from './realtime.mjs';
+import { createNotifier, TEMPLATES } from './notify.mjs';
+import { registerOps, DETAIL_KEYS } from './ops.mjs';
 
 const SESSION_TTL_MS = 12 * 3600e3;
 export const TEMP_TTL_MS = 72 * 3600e3;
@@ -39,6 +42,7 @@ const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon',
   '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json', '.woff2': 'font/woff2',
+  '.webp': 'image/webp', '.jpg': 'image/jpeg', '.txt': 'text/plain; charset=utf-8',
 };
 
 const SECURITY_HEADERS = {
@@ -53,7 +57,7 @@ const SECURITY_HEADERS = {
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; " +
     "img-src 'self' data: blob: https://*.googleapis.com https://*.gstatic.com https://*.google.com https://*.googleusercontent.com; " +
     "connect-src 'self' https://*.googleapis.com https://*.google.com https://*.gstatic.com data: blob:; " +
-    "worker-src blob:; frame-src https://*.google.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    "media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; frame-src https://*.google.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
 };
 
 // ---------- small validation helpers ----------
@@ -113,6 +117,21 @@ function readImage(v, label, { required = false } = {}) {
 const nairobiTime = (iso) => new Date(iso).toLocaleString('en-KE', {
   timeZone: 'Africa/Nairobi', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
 });
+/**
+ * Structured location details for a stop (building, number, floor, unit, gate, landmark, directions).
+ * Returns a compact object, or null when nothing was given.
+ */
+function readDetails(v, label) {
+  if (v === undefined || v === null || v === '') return null;
+  if (typeof v !== 'object' || Array.isArray(v)) throw bad(`${label}: location details must be an object.`);
+  const out = {};
+  for (const k of DETAIL_KEYS) {
+    const s = str(v[k], { max: k === 'directions' ? 300 : 80, label: `${label} ${k}` });
+    if (s) out[k] = s;
+  }
+  return Object.keys(out).length ? out : null;
+}
+const detailsJson = (d) => (d ? JSON.stringify(d) : null);
 /** Validates a pin: both coordinates or neither, and inside Kenya. */
 function kenyaPin(lat, lng, label) {
   if ((lat == null) !== (lng == null)) throw bad(`${label}: give both latitude and longitude.`);
@@ -122,7 +141,7 @@ function kenyaPin(lat, lng, label) {
 
 export function createApp({
   db, origin, cookieSecure = true, trustProxy = false, distDir, now = () => Date.now(), log = () => {},
-  integrations = noIntegrations(), onResetLink = null,
+  integrations = noIntegrations(), onResetLink = null, startWorkers = false,
 }) {
   if (!origin) throw new Error('APP_ORIGIN is required');
   const allowedOrigin = new URL(origin).origin;
@@ -134,6 +153,8 @@ export function createApp({
   };
   const iso = () => new Date(now()).toISOString();
   const loginAttempts = new Map();
+  const hub = createHub({ now });
+  const notifier = createNotifier({ db, now, integrations, hub, log, origin: allowedOrigin });
   const DUMMY_HASH = hashPassword('timing-equaliser-not-a-real-password');
 
   // ---------- serialization ----------
@@ -147,27 +168,27 @@ export function createApp({
   const dropoffOut = (d) => ({
     id: d.id, seq: d.seq, address: d.address, contactName: d.contact_name, contactPhone: d.contact_phone,
     lat: d.lat, lng: d.lng, instructions: d.instructions, status: d.status, handledAt: d.handled_at,
-    receivedBy: d.received_by, note: d.note,
+    receivedBy: d.received_by, note: d.note, details: parseJson(d.details, null),
   });
 
   /** All pickups in order: the request's own pickup is seq 1, extra pickups follow. */
   const pickupsOut = (r, extra = [], collected = []) => {
     const done = new Map(collected.map((c) => [c.seq, c]));
     return [
-      { seq: 1, address: r.pickup_address, contactName: r.pickup_contact_name, contactPhone: r.pickup_contact_phone, lat: r.pickup_lat, lng: r.pickup_lng },
-      ...extra.map((p) => ({ seq: p.seq, address: p.address, contactName: p.contact_name, contactPhone: p.contact_phone, lat: p.lat, lng: p.lng })),
+      { seq: 1, address: r.pickup_address, contactName: r.pickup_contact_name, contactPhone: r.pickup_contact_phone, lat: r.pickup_lat, lng: r.pickup_lng, details: parseJson(r.pickup_details, null) },
+      ...extra.map((p) => ({ seq: p.seq, address: p.address, contactName: p.contact_name, contactPhone: p.contact_phone, lat: p.lat, lng: p.lng, details: parseJson(p.details, null) })),
     ].map((p) => ({ ...p, collected: done.has(p.seq), collectedAt: done.get(p.seq)?.created_at || null, collectedFrom: done.get(p.seq)?.counterpart || null }));
   };
 
   const requestOut = (r, dropoffs = [], extra = [], collected = []) => ({
     id: r.id, ref: `RR-${String(r.id).padStart(4, '0')}`, title: r.title, category: r.category, priority: r.priority,
     status: r.status, version: r.version, source: r.source,
-    requester: { id: r.requester_id, name: r.requester_name },
+    requester: { id: r.requester_id, name: r.requester_name, phone: r.requester_phone || null },
     rider: r.rider_id ? { id: r.rider_id, name: r.rider_name, phone: r.rider_phone } : null,
     runId: r.run_id, runName: r.run_name || null,
     pickup: {
       address: r.pickup_address, contactName: r.pickup_contact_name, contactPhone: r.pickup_contact_phone,
-      lat: r.pickup_lat, lng: r.pickup_lng,
+      lat: r.pickup_lat, lng: r.pickup_lng, details: parseJson(r.pickup_details, null),
     },
     scheduledAt: r.scheduled_at, handling: parseJson(r.handling, []).filter((h) => HANDLING.includes(h)), handlingNotes: r.handling_notes, notes: r.notes,
     cancelReason: r.cancel_reason, createdAt: r.created_at, updatedAt: r.updated_at, assignedAt: r.assigned_at,
@@ -177,7 +198,7 @@ export function createApp({
   });
 
   const REQUEST_SELECT = `
-    SELECT r.*, q.name AS requester_name, k.name AS rider_name, k.phone AS rider_phone, run.name AS run_name
+    SELECT r.*, q.name AS requester_name, q.phone AS requester_phone, k.name AS rider_name, k.phone AS rider_phone, run.name AS run_name
     FROM requests r
     JOIN users q ON q.id = r.requester_id
     LEFT JOIN users k ON k.id = r.rider_id
@@ -222,7 +243,32 @@ export function createApp({
   function riderMayAccept(rider, row, waiting = waitingReserved(rider.company_id, row.id)) {
     return assignmentConflicts(row, { ...rider, tags: Array.isArray(rider.tags) ? rider.tags : parseJson(rider.tags, []) }, waiting).length === 0;
   }
-  const getVisibleRequest = (user, id) => withDropoffs([getVisibleRequestRow(user, id)])[0];
+  /**
+   * Contact details by role. Staff see everything. The requester sees the rider's number while the
+   * delivery is active. The assigned rider sees stop contacts and the requester's number while the job is
+   * active; riders browsing open jobs, and anyone after completion, see names only.
+   */
+  function redact(user, r) {
+    if (isStaff(user)) return r;
+    const active = ['assigned', 'collected'].includes(r.status);
+    const out = { ...r, requester: { ...r.requester } };
+    if (user.role === 'rider') {
+      const mine = r.rider?.id === user.id && active;
+      if (!mine) {
+        out.requester.phone = null;
+        out.pickup = { ...r.pickup, contactPhone: null };
+        out.pickups = r.pickups.map((p) => ({ ...p, contactPhone: null }));
+        out.dropoffs = r.dropoffs.map((d) => ({ ...d, contactPhone: null }));
+      }
+      if (out.rider && out.rider.id !== user.id) out.rider = { ...out.rider, phone: null };
+      return out;
+    }
+    // Requester: their own request (scope already guarantees ownership).
+    if (r.requester.id !== user.id) out.requester.phone = null;
+    if (out.rider && !active) out.rider = { ...out.rider, phone: null };
+    return out;
+  }
+  const getVisibleRequest = (user, id) => redact(user, withDropoffs([getVisibleRequestRow(user, id)])[0]);
 
   function logActivity(user, requestId, action, message, meta) {
     st(`INSERT INTO activity (company_id, request_id, user_id, action, message, meta, created_at) VALUES (?,?,?,?,?,?,?)`)
@@ -399,6 +445,7 @@ export function createApp({
       contactName: str(p.contactName, { max: 120, label: 'Pickup contact' }),
       contactPhone: str(p.contactPhone, { max: 40, label: 'Pickup phone' }),
       ...kenyaPin(num(p.lat, -90, 90, 'Pickup latitude'), num(p.lng, -180, 180, 'Pickup longitude'), 'The pickup pin'),
+      details: readDetails(p.details, 'Pickup'),
     };
     const extras = body.extraPickups ?? [];
     if (!Array.isArray(extras)) throw bad('Extra pickups must be a list.');
@@ -408,6 +455,7 @@ export function createApp({
       contactName: str(x?.contactName, { max: 120, label: `Pickup ${i + 2} contact` }),
       contactPhone: str(x?.contactPhone, { max: 40, label: `Pickup ${i + 2} phone` }),
       ...kenyaPin(num(x?.lat, -90, 90, `Pickup ${i + 2} latitude`), num(x?.lng, -180, 180, `Pickup ${i + 2} longitude`), `The pickup ${i + 2} pin`),
+      details: readDetails(x?.details, `Pickup ${i + 2}`),
     }));
     if (!Array.isArray(body.dropoffs) || body.dropoffs.length < 1) throw bad('Add at least one drop-off.');
     if (body.dropoffs.length > 12) throw bad('A request can have at most 12 drop-offs.');
@@ -417,6 +465,7 @@ export function createApp({
       contactPhone: str(d?.contactPhone, { max: 40, label: `Drop-off ${i + 1} phone` }),
       ...kenyaPin(num(d?.lat, -90, 90, `Drop-off ${i + 1} latitude`), num(d?.lng, -180, 180, `Drop-off ${i + 1} longitude`), `The drop-off ${i + 1} pin`),
       instructions: str(d?.instructions, { max: 500, label: `Drop-off ${i + 1} instructions` }),
+      details: readDetails(d?.details, `Drop-off ${i + 1}`),
     }));
     const handling = Array.isArray(body.handling) ? [...new Set(body.handling)] : [];
     if (handling.some((h) => !HANDLING.includes(h))) throw bad('Unknown handling instruction.');
@@ -430,16 +479,16 @@ export function createApp({
   }
 
   function insertPickups(requestId, extra) {
-    const ins = st('INSERT INTO pickups (request_id, seq, address, contact_name, contact_phone, lat, lng) VALUES (?,?,?,?,?,?,?)');
-    extra.forEach((p, i) => ins.run(requestId, i + 2, p.address, p.contactName, p.contactPhone, p.lat, p.lng));
+    const ins = st('INSERT INTO pickups (request_id, seq, address, contact_name, contact_phone, lat, lng, details) VALUES (?,?,?,?,?,?,?,?)');
+    extra.forEach((p, i) => ins.run(requestId, i + 2, p.address, p.contactName, p.contactPhone, p.lat, p.lng, detailsJson(p.details)));
   }
   /** Number of pickups already collected for a request. */
   const collectedCount = (requestId) => st(`SELECT COUNT(DISTINCT COALESCE(pickup_seq, 1)) AS n FROM records WHERE request_id = ? AND kind = 'collection'`).get(requestId).n;
 
   function insertDropoffs(requestId, dropoffs) {
-    const ins = st(`INSERT INTO dropoffs (request_id, seq, address, contact_name, contact_phone, lat, lng, instructions)
-      VALUES (?,?,?,?,?,?,?,?)`);
-    dropoffs.forEach((d, i) => ins.run(requestId, i + 1, d.address, d.contactName, d.contactPhone, d.lat, d.lng, d.instructions));
+    const ins = st(`INSERT INTO dropoffs (request_id, seq, address, contact_name, contact_phone, lat, lng, instructions, details)
+      VALUES (?,?,?,?,?,?,?,?,?)`);
+    dropoffs.forEach((d, i) => ins.run(requestId, i + 1, d.address, d.contactName, d.contactPhone, d.lat, d.lng, d.instructions, detailsJson(d.details)));
   }
 
   // ---------- sessions ----------
@@ -724,9 +773,13 @@ export function createApp({
     }
     const rows = st(`${REQUEST_SELECT} WHERE ${conds.join(' AND ')} ORDER BY r.id DESC LIMIT 500`).all(...params);
     const STATUS_ORDER = { pending: 0, assigned: 1, collected: 2, delivered: 3, cancelled: 4 };
-    const list = withDropoffs(rows).sort((a, b) =>
+    const list = withDropoffs(rows).map((r) => redact(user, r)).sort((a, b) =>
       STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || priorityRank(a) - priorityRank(b) ||
       String(a.scheduledAt || a.createdAt).localeCompare(String(b.scheduledAt || b.createdAt)));
+    if (user.role === 'rider') {
+      const acks = ops.pendingAcks(user.id);
+      for (const r of list) if (acks.has(r.id)) r.changesToConfirm = acks.get(r.id);
+    }
     return { requests: list };
   });
 
@@ -738,9 +791,9 @@ export function createApp({
     const id = tx(db, () => {
       const t = iso();
       const r = st(`INSERT INTO requests (company_id, requester_id, title, category, priority, pickup_address, pickup_contact_name,
-        pickup_contact_phone, pickup_lat, pickup_lng, scheduled_at, handling, handling_notes, notes, source, created_at, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(user.company_id, user.id, p.title, p.category, p.priority, p.pickup.address,
-        p.pickup.contactName, p.pickup.contactPhone, p.pickup.lat, p.pickup.lng, p.scheduledAt, JSON.stringify(p.handling),
+        pickup_contact_phone, pickup_lat, pickup_lng, pickup_details, scheduled_at, handling, handling_notes, notes, source, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(user.company_id, user.id, p.title, p.category, p.priority, p.pickup.address,
+        p.pickup.contactName, p.pickup.contactPhone, p.pickup.lat, p.pickup.lng, detailsJson(p.pickup.details), p.scheduledAt, JSON.stringify(p.handling),
         p.handlingNotes, p.notes, p.source, t, t);
       const id = Number(r.lastInsertRowid);
       insertPickups(id, p.extraPickups);
@@ -761,6 +814,7 @@ export function createApp({
       outcome: x.outcome, itemCount: x.item_count, note: x.note, gpsStatus: x.gps_status, createdAt: x.created_at,
       photo: x.photo_id ? `/api/attachments/${x.photo_id}` : null, signature: x.signature_id ? `/api/attachments/${x.signature_id}` : null,
       dnoteRef: x.dnote_ref, signedBy: x.signed_by, pickupSeq: x.kind === 'collection' ? (x.pickup_seq || 1) : null,
+      gps: x.lat != null ? { lat: x.lat, lng: x.lng, accuracy: x.accuracy } : null, recordedOnDeviceAt: x.client_recorded_at,
     }));
     const activity = st(`SELECT a.*, u.name AS user_name FROM activity a LEFT JOIN users u ON u.id = a.user_id
       WHERE a.request_id = ? ORDER BY a.id DESC`).all(id).map(activityOut);
@@ -774,7 +828,7 @@ export function createApp({
       const row = st('SELECT * FROM requests WHERE id = ?').get(id);
       fuel = requestFuel(row, st('SELECT * FROM dropoffs WHERE request_id = ? ORDER BY seq').all(id));
     }
-    return { request, records, activity, overrides, notifications, fuel };
+    return { request, records, activity, overrides, notifications, fuel, ...ops.detailExtras(user, request) };
   });
 
   route('PATCH', '/api/requests/:id', ({ user, params, body }) => {
@@ -788,16 +842,18 @@ export function createApp({
     if (['collected', 'delivered', 'cancelled'].includes(row.status) || collectedCount(id)) throw new HttpError(409, 'locked', 'This request can no longer be edited.');
     const p = readRequestPayload(body);
     if (p.scheduledAt !== row.scheduled_at) checkSchedule(p.scheduledAt);
+    const before = ops.stopsOf(id);
     tx(db, () => {
       bump(user, id, version, `title = ?, category = ?, priority = ?, pickup_address = ?, pickup_contact_name = ?, pickup_contact_phone = ?,
-        pickup_lat = ?, pickup_lng = ?, scheduled_at = ?, handling = ?, handling_notes = ?, notes = ?`,
+        pickup_lat = ?, pickup_lng = ?, pickup_details = ?, scheduled_at = ?, handling = ?, handling_notes = ?, notes = ?`,
       [p.title, p.category, p.priority, p.pickup.address, p.pickup.contactName, p.pickup.contactPhone, p.pickup.lat, p.pickup.lng,
-        p.scheduledAt, JSON.stringify(p.handling), p.handlingNotes, p.notes]);
+        detailsJson(p.pickup.details), p.scheduledAt, JSON.stringify(p.handling), p.handlingNotes, p.notes]);
       st('DELETE FROM dropoffs WHERE request_id = ?').run(id);
       insertDropoffs(id, p.dropoffs);
       st('DELETE FROM pickups WHERE request_id = ?').run(id);
       insertPickups(id, p.extraPickups);
       logActivity(user, id, 'edited', `${user.name} edited the request details`);
+      ops.recordStopChanges(user, row, before, ops.stopsOf(id), null);
     });
     return { request: getVisibleRequest(user, id) };
   });
@@ -816,6 +872,7 @@ export function createApp({
       bump(user, id, version, `status = 'cancelled', cancel_reason = ?, run_id = NULL`, [reason]);
       logActivity(user, id, 'cancelled', `${user.name} cancelled the request${reason ? `: ${reason}` : ''}`);
     });
+    if (row.rider_id) ops.events.cancelled(row, user, reason);
     return { request: getVisibleRequest(user, id) };
   });
 
@@ -838,7 +895,8 @@ export function createApp({
     }
     const rider = getRider(user, intId(body.riderId, 'rider'));
     if (row.rider_id === rider.id) return { request: getVisibleRequest(user, id) };
-    const conflicts = assignmentConflicts(row, rider, waitingReserved(user.company_id, id));
+    const conflicts = [...assignmentConflicts(row, rider, waitingReserved(user.company_id, id)), ...ops.busyConflicts(rider, id)];
+    const warnings = ops.assignWarnings(rider);
     const override = body.override;
     if (conflicts.length) {
       const reason = typeof override?.reason === 'string' ? override.reason.trim() : '';
@@ -856,9 +914,12 @@ export function createApp({
           { conflicts: conflicts.map((c) => c.code) });
       }
       logActivity(user, id, 'assigned', `${user.name} assigned ${rider.name}${row.rider_name ? ` (was ${row.rider_name})` : ''}`);
+      // An authorised override puts a rider on break back to work.
+      if (rider.break_since) st('UPDATE users SET break_since = NULL WHERE id = ?').run(rider.id);
     });
     background(notifyRider(id));
-    return { request: getVisibleRequest(user, id) };
+    ops.events.assigned(id, rider);
+    return { request: getVisibleRequest(user, id), warnings };
   });
 
   route('POST', '/api/requests/:id/notify', async ({ user, params }) => {
@@ -904,20 +965,26 @@ export function createApp({
     const counterpart = str(body.collectedFrom, { max: 120, required: true, label: 'Collected from' });
     const note = str(body.note, { max: 500, label: 'Note' });
     const itemCount = body.itemCount == null || body.itemCount === '' ? null : intId(body.itemCount, 'item count');
-    const photo = readImage(body.photo, 'A photo of the collected items', { required: true });
+    // Pickup photo is optional (MVP feedback); the drop-off photo stays required.
+    const photo = readImage(body.photo, 'A photo of the collected items');
     const signature = readImage(body.signature, 'The D-note signature');
     const dnoteRef = str(body.dnoteRef, { max: 60, label: 'D-note number' });
+    ops.requireAcknowledged(id, 'pickup', seq);
+    const gps = ops.readGps(body.gps, ops.stopPin(row, 'pickup', seq));
     tx(db, () => {
       // The request counts as collected (and moves to "in transit") once every pickup is done.
       if (allDone) bump(user, id, version, `status = 'collected', collected_at = ?`, [iso()]);
       else bump(user, id, version, '', []);
-      const photoId = storeAttachment(user, id, 'photo', 'collection', photo);
+      const photoId = photo ? storeAttachment(user, id, 'photo', 'collection', photo) : null;
       const signatureId = signature ? storeAttachment(user, id, 'signature', 'collection', signature) : null;
-      st(`INSERT INTO records (request_id, kind, user_id, counterpart, item_count, note, gps_status, photo_id, signature_id, dnote_ref, signed_by, pickup_seq, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(id, 'collection', user.id, counterpart, itemCount, note, 'unconnected', photoId, signatureId, dnoteRef, signature ? counterpart : null, seq, iso());
-      logActivity(user, id, 'collected', `${user.name} collected${total > 1 ? ` pickup ${seq} of ${total}` : ''} from ${counterpart}${itemCount ? ` (${itemCount} item${itemCount > 1 ? 's' : ''})` : ''} · photo${signature ? ' and signed D-note' : ''} recorded`);
+      st(`INSERT INTO records (request_id, kind, user_id, counterpart, item_count, note, gps_status, photo_id, signature_id, dnote_ref, signed_by, pickup_seq,
+        lat, lng, accuracy, client_recorded_at, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, 'collection', user.id, counterpart, itemCount, note, gps.status, photoId, signatureId, dnoteRef, signature ? counterpart : null, seq,
+          gps.lat, gps.lng, gps.accuracy, gps.recordedAt, iso());
+      const proofs = [photo && 'photo', signature && 'signed D-note'].filter(Boolean);
+      logActivity(user, id, 'collected', `${user.name} collected${total > 1 ? ` pickup ${seq} of ${total}` : ''} from ${counterpart}${itemCount ? ` (${itemCount} item${itemCount > 1 ? 's' : ''})` : ''}${proofs.length ? ` · ${proofs.join(' and ')} recorded` : ''}`);
     });
+    if (allDone) ops.events.collected(id);
     return { request: getVisibleRequest(user, id), remainingPickups: total - done.size - 1 };
   }, { bodyLimit: PROOF_BODY_LIMIT });
 
@@ -953,15 +1020,18 @@ export function createApp({
     const photo = readImage(body.photo, 'A photo of the delivery', { required: delivered });
     const signature = delivered ? readImage(body.signature, 'The recipient’s D-note signature', { required: true }) : null;
     const dnoteRef = str(body.dnoteRef, { max: 60, label: 'D-note number' });
+    ops.requireAcknowledged(id, 'dropoff', d.seq);
+    const gps = ops.readGps(body.gps, d.lat != null ? { lat: d.lat, lng: d.lng } : null);
     const result = tx(db, () => {
       bump(user, id, version, '', []);
       st('UPDATE dropoffs SET status = ?, handled_at = ?, received_by = ?, note = ? WHERE id = ?')
         .run(outcome, iso(), receivedBy, note, dropoffId);
       const photoId = photo ? storeAttachment(user, id, 'photo', 'handover', photo) : null;
       const signatureId = signature ? storeAttachment(user, id, 'signature', 'handover', signature) : null;
-      st(`INSERT INTO records (request_id, dropoff_id, kind, user_id, counterpart, outcome, note, gps_status, photo_id, signature_id, dnote_ref, signed_by, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(id, dropoffId, 'handover', user.id, receivedBy, outcome, note, 'unconnected', photoId, signatureId, dnoteRef, signature ? receivedBy : null, iso());
+      st(`INSERT INTO records (request_id, dropoff_id, kind, user_id, counterpart, outcome, note, gps_status, photo_id, signature_id, dnote_ref, signed_by,
+        lat, lng, accuracy, client_recorded_at, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, dropoffId, 'handover', user.id, receivedBy, outcome, note, gps.status, photoId, signatureId, dnoteRef, signature ? receivedBy : null,
+          gps.lat, gps.lng, gps.accuracy, gps.recordedAt, iso());
       logActivity(user, id, delivered ? 'handover' : 'handover_failed',
         delivered
           ? `${user.name} handed over drop-off ${d.seq} to ${receivedBy} · photo and signed D-note${dnoteRef ? ` ${dnoteRef}` : ''} recorded`
@@ -973,6 +1043,7 @@ export function createApp({
       }
       return left;
     });
+    ops.events.handover(id, d.seq, { delivered, receivedBy, note, allDone: result === 0 });
     return { request: getVisibleRequest(user, id), remaining: result };
   }, { bodyLimit: PROOF_BODY_LIMIT });
 
@@ -988,7 +1059,7 @@ export function createApp({
         if (RESERVED.includes(r.category)) w[r.category] = Math.max(0, (w[r.category] || 0) - 1);
         return riderMayAccept(me, r, w);
       });
-    const jobs = withDropoffs(rows).sort((a, b) => priorityRank(a) - priorityRank(b) ||
+    const jobs = withDropoffs(rows).map((r) => redact(user, r)).sort((a, b) => priorityRank(a) - priorityRank(b) ||
       String(a.scheduledAt || a.createdAt).localeCompare(String(b.scheduledAt || b.createdAt)));
     return { jobs, onShift: !!me.on_shift };
   });
@@ -1004,12 +1075,15 @@ export function createApp({
     if (row.status !== 'pending' || row.rider_id) throw new HttpError(409, 'taken', 'This job has already been taken. Pick another one.');
     const conflicts = assignmentConflicts(row, { ...me, tags: parseJson(me.tags, []) }, waitingReserved(user.company_id, id));
     if (conflicts.length) throw new HttpError(403, 'not_eligible', `${conflicts[0].message} Ask dispatch to assign it.`, { conflicts });
+    const busy = ops.busyConflicts(me, id);
+    if (busy.length) throw new HttpError(409, busy[0].code === 'rider_on_break' ? 'on_break' : 'busy', busy[0].selfMessage, { conflicts: busy });
     tx(db, () => {
       const res = st(`UPDATE requests SET rider_id = ?, run_id = NULL, status = 'assigned', assigned_at = ?, version = version + 1, updated_at = ?
         WHERE id = ? AND version = ? AND status = 'pending' AND rider_id IS NULL`).run(user.id, iso(), iso(), id, version);
       if (res.changes === 0) throw new HttpError(409, 'taken', 'This job just changed or was taken by someone else. The list has been refreshed.');
       logActivity(user, id, 'accepted', `${user.name} accepted the job`);
     });
+    ops.events.accepted(id, me);
     return { request: getVisibleRequest(user, id) };
   });
 
@@ -1035,7 +1109,7 @@ export function createApp({
       WHERE ${conds.join(' AND ')} ORDER BY CASE run.status WHEN 'active' THEN 0 WHEN 'planned' THEN 1 ELSE 2 END, run.id DESC LIMIT 200`).all(...params);
     if (!runs.length) return [];
     const reqRows = st(`${REQUEST_SELECT} WHERE r.run_id IN (SELECT value FROM json_each(?)) ORDER BY r.id`).all(JSON.stringify(runs.map((r) => r.id)));
-    const reqs = withDropoffs(reqRows);
+    const reqs = withDropoffs(reqRows).map((r) => redact(user, r));
     return runs.map((r) => runOut(r, reqs.filter((q) => q.runId === r.id)));
   }
   route('GET', '/api/runs', ({ user }) => ({ runs: listRuns(user) }));
@@ -1117,23 +1191,30 @@ export function createApp({
     const rider = st(`SELECT * FROM users WHERE id = ? AND company_id = ? AND role = 'rider'`).get(id, user.company_id);
     if (!rider) throw notFound('Rider not found.');
     if (!rider.active) throw bad(`${rider.name} is deactivated.`);
-    if (!!rider.on_shift === body.onShift) return { rider: riderShiftOut(rider) };
+    // Clocking in twice or out twice is a no-op (no duplicate shift records).
+    if (!!rider.on_shift === body.onShift) return { rider: riderShiftOut(rider), unchanged: true };
     const self = user.id === rider.id;
+    if (!body.onShift && self) {
+      const carrying = st(`SELECT COUNT(*) AS n FROM requests WHERE rider_id = ? AND status = 'collected'`).get(id).n;
+      if (carrying) throw new HttpError(409, 'carrying', `You are carrying items for ${carrying} delivery${carrying > 1 ? 'ies' : ''}. Hand them over (or report an incident) before clocking out, or ask dispatch.`);
+    }
     tx(db, () => {
       const t = iso();
       if (body.onShift) {
-        st('UPDATE users SET on_shift = 1, on_shift_since = ? WHERE id = ?').run(t, id);
-        logActivity(user, null, 'shift_on', self ? `${rider.name} went on shift` : `${user.name} put ${rider.name} on shift`);
+        st('UPDATE users SET on_shift = 1, on_shift_since = ?, break_since = NULL, last_seen_at = ? WHERE id = ?').run(t, t, id);
+        logActivity(user, null, 'shift_on', self ? `${rider.name} clocked in` : `${user.name} clocked ${rider.name} in`);
       } else {
         if (rider.on_shift_since && rider.on_shift_since < t) {
-          st('INSERT INTO shifts (company_id, rider_id, starts_at, ends_at, note, created_by, created_at) VALUES (?,?,?,?,?,?,?)')
-            .run(user.company_id, id, rider.on_shift_since, t, null, user.id, t);
+          const o = ops.shiftTotals(rider, t);
+          st(`INSERT INTO shifts (company_id, rider_id, starts_at, ends_at, note, created_by, created_at, planned_minutes, overtime_minutes, approved_overtime_minutes)
+            VALUES (?,?,?,?,?,?,?,?,?,?)`).run(user.company_id, id, rider.on_shift_since, t, null, user.id, t, o.plannedMinutes, o.overtimeMinutes, o.approvedMinutes);
         }
-        st('UPDATE users SET on_shift = 0, on_shift_since = NULL WHERE id = ?').run(id);
+        st('UPDATE users SET on_shift = 0, on_shift_since = NULL, break_since = NULL WHERE id = ?').run(id);
         st('DELETE FROM rider_locations WHERE rider_id = ?').run(id);
-        logActivity(user, null, 'shift_off', self ? `${rider.name} went off shift` : `${user.name} took ${rider.name} off shift`);
+        logActivity(user, null, 'shift_off', self ? `${rider.name} clocked out` : `${user.name} clocked ${rider.name} out`);
       }
     });
+    hub.publish(user.company_id, 'riders', { id });
     return { rider: riderShiftOut(st('SELECT * FROM users WHERE id = ?').get(id)) };
   });
 
@@ -1163,32 +1244,35 @@ export function createApp({
       st('INSERT INTO location_points (company_id, rider_id, lat, lng, accuracy, speed, recorded_at) VALUES (?,?,?,?,?,?,?)')
         .run(user.company_id, user.id, lat, lng, accuracy, speed, at);
     });
+    hub.publish(user.company_id, 'location', { riderId: user.id });
     if (++pointsSincePrune >= 1000) {
       pointsSincePrune = 0;
       st('DELETE FROM location_points WHERE recorded_at < ?').run(new Date(t - 90 * 864e5).toISOString());
     }
     return { ok: true, stored: true };
-  });
+  }, { quiet: true });
 
   route('GET', '/api/live', ({ user }) => {
     needRole(user, STAFF);
-    const rows = st(`SELECT u.id, u.name, u.phone, u.tags, u.vehicle, u.on_shift, u.on_shift_since,
+    const rows = st(`SELECT u.id, u.name, u.phone, u.tags, u.vehicle, u.on_shift, u.on_shift_since, u.break_since, u.last_seen_at,
         l.lat, l.lng, l.accuracy, l.heading, l.speed, l.recorded_at
       FROM users u LEFT JOIN rider_locations l ON l.rider_id = u.id
       WHERE u.company_id = ? AND u.role = 'rider' AND u.active = 1 ORDER BY u.on_shift DESC, u.name`).all(user.company_id);
     const jobs = withDropoffs(st(`${REQUEST_SELECT} WHERE r.company_id = ? AND r.status IN ('assigned','collected')`).all(user.company_id));
-    return {
-      serverTime: iso(),
-      riders: rows.map((r) => ({
+    const avail = ops.availabilityMap(user.company_id);
+    const riderList = rows.map((r) => ({
         id: r.id, name: r.name, phone: r.phone, tags: parseJson(r.tags, []), vehicle: r.vehicle || 'petrol', onShift: !!r.on_shift, onShiftSince: r.on_shift_since,
+        ...avail.get(r.id),
         location: r.on_shift && r.lat != null
           ? { lat: r.lat, lng: r.lng, accuracy: r.accuracy, heading: r.heading, speed: r.speed, recordedAt: r.recorded_at } : null,
         jobs: jobs.filter((j) => j.rider?.id === r.id).map((j) => ({
           id: j.id, ref: j.ref, title: j.title, status: j.status, priority: j.priority, pickup: j.pickup,
           next: j.status === 'assigned' ? { kind: 'pickup', ...(j.pickups.find((p) => !p.collected) || j.pickup) } : { kind: 'drop', ...(j.dropoffs.find((d) => d.status !== 'delivered') || {}) },
+          stops: [...j.pickups.map((p) => ({ kind: 'pickup', seq: p.seq, lat: p.lat, lng: p.lng, address: p.address, done: p.collected })),
+            ...j.dropoffs.map((d) => ({ kind: 'drop', seq: d.seq, lat: d.lat, lng: d.lng, address: d.address, done: d.status === 'delivered' }))],
         })),
-      })),
-    };
+      }));
+    return { serverTime: iso(), riders: riderList, summary: ops.availabilitySummary(riderList), incidents: ops.openIncidents(user.company_id), settings: ops.publicSettings(user.company_id) };
   });
 
   // Kenya-only address search: Google Geocoding (restricted to KE) when configured, else the built-in place list.
@@ -1210,8 +1294,9 @@ export function createApp({
     kenyaBounds: KENYA_BOUNDS,
     geocoder: integrations.geocode.configured ? 'google' : 'gazetteer',
     routing: integrations.routes.configured ? 'google' : 'estimate',
-    notifications: { whatsapp: integrations.whatsapp.configured, sms: integrations.sms.configured },
+    notifications: { whatsapp: integrations.whatsapp.configured, sms: integrations.sms.configured, push: !!integrations.push?.configured },
     email: integrations.email?.configured || false,
+    realtime: true,
   }));
 
   // Fuel & quotes
@@ -1408,11 +1493,21 @@ export function createApp({
           (SELECT COUNT(*) FROM requests r WHERE r.rider_id = u.id AND r.status = 'delivered' AND r.delivered_at >= ?) AS done_today,
           u.on_shift, u.on_shift_since, u.phone, u.vehicle
         FROM users u WHERE u.company_id = ? AND u.role = 'rider' AND u.active = 1 ORDER BY u.name`)
-        .all(startOfDay.toISOString(), user.company_id)
-        .map((r) => ({ id: r.id, name: r.name, phone: r.phone, tags: parseJson(r.tags, []), openJobs: r.open_jobs, doneToday: r.done_today,
-          onShift: !!r.on_shift, onShiftSince: r.on_shift_since || null, vehicle: r.vehicle || 'petrol' }));
+        .all(startOfDay.toISOString(), user.company_id);
+      const avail = ops.availabilityMap(user.company_id);
+      riders = riders.map((r) => ({ id: r.id, name: r.name, phone: r.phone, tags: parseJson(r.tags, []), openJobs: r.open_jobs, doneToday: r.done_today,
+          onShift: !!r.on_shift, onShiftSince: r.on_shift_since || null, vehicle: r.vehicle || 'petrol', ...avail.get(r.id) }));
     }
-    return { byStatus, deliveredToday, urgentOpen, reservedWaiting, scheduled, avgMinutes: avg ? Math.round(avg) : null, days, riders };
+    return { byStatus, deliveredToday, urgentOpen, reservedWaiting, scheduled, avgMinutes: avg ? Math.round(avg) : null, days, riders,
+      ...(isStaff(user) ? { availability: ops.availabilitySummary(riders), openIncidents: ops.openIncidents(user.company_id).length } : {}) };
+  });
+
+  // ---------- v2 operations: availability, incidents, location changes, ratings, shifts, notifications, sync ----------
+  const ops = registerOps({
+    route, st, db, tx, iso, now, hub, notifier, TEMPLATES, integrations, origin: allowedOrigin, log,
+    HttpError, bad, forbidden, notFound, needWriter, needRole, str, num, intId, isoDate, parseJson, readImage, kenyaPin, readDetails, detailsJson,
+    logActivity, logSystem, getVisibleRequestRow, getVisibleRequest, withDropoffs, REQUEST_SELECT, refOf, isStaff, canWrite, fuelSettings,
+    securityHeaders: SECURITY_HEADERS, proofBodyLimit: PROOF_BODY_LIMIT,
   });
 
   // ---------- HTTP plumbing ----------
@@ -1422,7 +1517,9 @@ export function createApp({
     res.end(body);
   }
 
-  async function readBody(req, limit = BODY_LIMIT) {
+  async function readBody(req, limit = BODY_LIMIT, { form = false, binary = false } = {}) {
+    const declared = Number(req.headers['content-length']);
+    if (declared > limit) throw new HttpError(413, 'too_large', 'Request body is too large.');
     const chunks = [];
     let size = 0;
     for await (const chunk of req) {
@@ -1431,8 +1528,11 @@ export function createApp({
       chunks.push(chunk);
     }
     if (!size) return { body: {}, raw: Buffer.alloc(0) };
-    if (!String(req.headers['content-type'] || '').includes('application/json')) throw new HttpError(415, 'json_only', 'Send JSON.');
+    const type = String(req.headers['content-type'] || '');
     const raw = Buffer.concat(chunks);
+    if (binary && !type.includes('application/json')) return { body: {}, raw };
+    if (form && type.includes('application/x-www-form-urlencoded')) return { body: Object.fromEntries(new URLSearchParams(raw.toString('utf8'))), raw };
+    if (!type.includes('application/json')) throw new HttpError(415, 'json_only', 'Send JSON.');
     try {
       const parsed = JSON.parse(raw.toString('utf8'));
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
@@ -1459,21 +1559,56 @@ export function createApp({
       const o = req.headers.origin;
       if (!o || o !== allowedOrigin) throw new HttpError(403, 'bad_origin', 'Cross-origin request blocked.');
     }
-    const { body, raw } = mutating ? await readBody(req, match.r.opts.bodyLimit) : { body: {}, raw: Buffer.alloc(0) };
-    const ctx = { req, res, body, raw, params: match.params, query: url.searchParams };
+    // Authenticate before reading a large body.
+    let session = null;
     if (!match.r.opts.public) {
-      const session = loadSession(req);
+      session = loadSession(req);
       if (!session) throw new HttpError(401, 'unauthenticated', 'Please sign in.');
       if (mutating && req.headers['x-csrf-token'] !== session.csrf) throw new HttpError(403, 'bad_csrf', 'Your session token is invalid. Reload the page.');
       if (session.must_change && !match.r.opts.allowPending) {
         throw new HttpError(403, 'password_change_required', 'Replace your temporary password to continue.');
       }
-      ctx.session = session;
-      ctx.user = session;
+      if (session.role === 'rider' && (!session.last_seen_at || new Date(session.last_seen_at).getTime() < now() - 60e3)) {
+        st('UPDATE users SET last_seen_at = ? WHERE id = ?').run(iso(), session.id);
+      }
     }
+    // Offline sync: a mutating call carrying an Idempotency-Key is executed once per user; replays get the stored answer.
+    const idemKey = mutating && session ? req.headers['idempotency-key'] : null;
+    if (idemKey !== undefined && idemKey !== null) {
+      if (!/^[A-Za-z0-9_.:-]{8,100}$/.test(idemKey)) throw bad('Invalid Idempotency-Key.');
+      const prev = st('SELECT * FROM idempotency WHERE user_id = ? AND key = ?').get(session.id, idemKey);
+      if (prev) {
+        if (prev.path !== url.pathname || prev.method !== method) throw new HttpError(422, 'idempotency_mismatch', 'This sync key was already used for a different action.');
+        req.resume();
+        return send(res, prev.status, JSON.parse(prev.response), { 'Idempotent-Replay': 'true' });
+      }
+    }
+    const { body, raw } = mutating ? await readBody(req, match.r.opts.bodyLimit, match.r.opts) : { body: {}, raw: Buffer.alloc(0) };
+    const ctx = { req, res, body, raw, params: match.params, query: url.searchParams };
+    if (session) { ctx.session = session; ctx.user = session; }
     const out = await match.r.handler(ctx);
+    if (out && out.__stream) return;
+    if (mutating && session && !match.r.opts.quiet) {
+      hub.publish(session.company_id, 'change', { path: url.pathname, by: session.id });
+    }
+    if (idemKey && out && !out.__binary && typeof out.__text !== 'string') {
+      st('INSERT OR IGNORE INTO idempotency (user_id, key, method, path, status, response, created_at) VALUES (?,?,?,?,?,?,?)')
+        .run(session.id, idemKey, method, url.pathname, 200, JSON.stringify(out), iso());
+    }
     if (out && out.__binary) {
-      res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': out.type, 'Cache-Control': 'private, max-age=86400', 'Content-Length': out.__binary.length });
+      const total = out.__binary.length;
+      const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+      if (range && out.ranges) {
+        // Video evidence: support byte ranges so players can seek.
+        let start = range[1] === '' ? Math.max(0, total - Number(range[2])) : Number(range[1]);
+        let end = range[1] !== '' && range[2] !== '' ? Math.min(Number(range[2]), total - 1) : total - 1;
+        if (start > end || start >= total) { res.writeHead(416, { ...SECURITY_HEADERS, 'Content-Range': `bytes */${total}` }); return res.end(); }
+        res.writeHead(206, { ...SECURITY_HEADERS, 'Content-Type': out.type, 'Cache-Control': 'private, max-age=86400', 'Accept-Ranges': 'bytes',
+          'Content-Range': `bytes ${start}-${end}/${total}`, 'Content-Length': end - start + 1 });
+        return res.end(out.__binary.subarray(start, end + 1));
+      }
+      res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': out.type, 'Cache-Control': 'private, max-age=86400', 'Content-Length': total,
+        ...(out.ranges ? { 'Accept-Ranges': 'bytes' } : {}) });
       return res.end(out.__binary);
     }
     if (out && typeof out.__text === 'string') {
@@ -1527,7 +1662,14 @@ export function createApp({
     }
   }
   /** Resolves when background work (rider notifications) has finished. Used by tests and shutdown. */
-  handler.idle = () => Promise.allSettled([...inflight]);
+  handler.idle = async () => { await Promise.allSettled([...inflight]); await notifier.idle(); };
+  /** One pass of the background jobs (SMS fallback sweep, SMS outbox, shift/standby checks). */
+  handler.tick = async () => { ops.tick(); await notifier.tick(); };
+  handler.notifier = notifier;
+  handler.hub = hub;
+  let timer = null;
+  if (startWorkers) { timer = setInterval(() => handler.tick().catch((err) => log('error', err)), 5000); timer.unref?.(); }
+  handler.close = () => { if (timer) clearInterval(timer); hub.close(); };
   return handler;
 }
 

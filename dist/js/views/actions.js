@@ -1,12 +1,24 @@
 // Shared request actions: assignment with priority-rule overrides, stale-version handling.
 import { api } from '../api.js';
-import { html, ic, openModal, toast, avatar, tagBadges, vehicleBadge, fmtTime } from '../ui.js';
+import { html, ic, openModal, toast, avatar, tagBadges, vehicleBadge, fmtTime, timeAgo } from '../ui.js';
+
+export const AVAIL_BADGE = {
+  available: ['s-delivered', 'Available'], assigned: ['s-assigned', 'Assigned'], on_delivery: ['s-collected', 'On delivery'],
+  on_break: ['s-pending', 'On break'], offline: ['b-outline', 'Offline'],
+};
+/** Availability badge for a rider row from /api/stats or /api/live. */
+export const availBadge = (rd) => {
+  const [tone, label] = AVAIL_BADGE[rd.availability] || AVAIL_BADGE[rd.onShift ? 'available' : 'offline'];
+  return html`<span class="badge dot ${tone}">${label}</span>${rd.unresponsive ? html`<span class="badge s-failed" title="No contact from the rider's app since ${rd.lastSeenAt ? fmtTime(rd.lastSeenAt) : 'clock-in'}">${ic('wifiOff')}Not responding</span>` : ''}${rd.breakOverdue ? html`<span class="badge s-failed">${ic('coffee')}Long break</span>` : ''}`;
+};
+export const ratingBadge = (rd) => (rd.rating ? html`<span class="badge b-outline" title="${rd.rating.count} client rating${rd.rating.count === 1 ? '' : 's'}">${ic('starFill')}${rd.rating.avg.toFixed(1)}</span>` : '');
+export const lastSeen = (rd) => (rd.lastSeenAt ? `seen ${timeAgo(rd.lastSeenAt)}` : 'not seen yet');
 
 /** Ask the dispatcher to acknowledge a priority conflict and give a reason. Resolves to reason or null. */
 export function overrideDialog({ conflicts, rider, request }) {
   return openModal({
-    title: 'Priority rule conflict',
-    subtitle: `Assigning ${rider} to ${request.ref} breaks a reserved-work rule. Overrides are recorded in the request history.`,
+    title: conflicts.every((c) => c.code.startsWith('rider_')) ? `${rider} is not free` : 'Priority rule conflict',
+    subtitle: `Assigning ${rider} to ${request.ref} needs an authorised override. Overrides are recorded in the request history.`,
     iconName: 'alert', tone: 'warn',
     body: html`
       <div class="stack-sm">${conflicts.map((c) => html`<div class="alert warn">${ic('triangle', 'sm')}<span>${c.message}</span></div>`)}</div>
@@ -34,6 +46,7 @@ export async function assign(request, riderId, { riderName } = {}) {
   try {
     const res = await send();
     toast(riderId ? `${request.ref} assigned to ${res.request.rider?.name} · notifying the rider` : `${request.ref} moved back to the queue`);
+    res.warnings?.forEach((w) => toast(w.message, 'warn'));
     return res.request;
   } catch (err) {
     if (err.code === 'override_required') {
@@ -42,6 +55,7 @@ export async function assign(request, riderId, { riderName } = {}) {
       try {
         const res = await send({ acknowledged: true, reason });
         toast(`Override recorded · ${request.ref} assigned to ${res.request.rider?.name} · notifying the rider`, 'warn');
+        res.warnings?.forEach((w) => toast(w.message, 'warn'));
         return res.request;
       } catch (e2) { return handleError(e2); }
     }
@@ -70,7 +84,7 @@ export async function acceptJob(request) {
     toast(`${request.ref} is yours. Head to the pickup.`);
     return res.request;
   } catch (err) {
-    toast(err.message, err.code === 'taken' || err.code === 'off_shift' ? 'warn' : 'err');
+    toast(err.message, ['taken', 'off_shift', 'busy', 'on_break'].includes(err.code) ? 'warn' : 'err');
     return null;
   }
 }
@@ -91,14 +105,19 @@ export function pickRiderDialog({ request, riders }) {
     subtitle: `${request.ref} · ${request.title}`,
     iconName: 'bike',
     body: html`<div class="pick-list">
-      ${[['Available · on shift', riders.filter((r) => r.onShift).sort((a, b) => (a.openJobs ?? 0) - (b.openJobs ?? 0)), true],
-        ['Unavailable · off shift', riders.filter((r) => !r.onShift), false]].map(([label, list, on]) => (list.length ? html`
-        <div class="pick-group ${on ? 'on' : 'off'}">${on ? html`<span class="onshift"></span>` : html`<span class="offshift"></span>`}${label}<span class="n">${list.length}</span></div>
+      ${(() => {
+        const ready = (r) => r.onShift && r.availability === 'available' && !r.unresponsive && !r.atCapacity;
+        const busyR = (r) => r.onShift && !ready(r) && r.availability !== 'on_break';
+        return [['Ready now', riders.filter(ready), 'on'], ['Busy · assigned, on delivery or not responding', riders.filter(busyR).sort((a, b) => (a.openJobs ?? 0) - (b.openJobs ?? 0)), 'busy'],
+          ['On break', riders.filter((r) => r.onShift && r.availability === 'on_break'), 'brk'], ['Offline · clocked out', riders.filter((r) => !r.onShift), 'off']];
+      })().map(([label, list, kind]) => (list.length ? html`
+        <div class="pick-group ${kind === 'on' ? 'on' : 'off'}">${kind === 'on' ? html`<span class="onshift"></span>` : html`<span class="offshift"></span>`}${label}<span class="n">${list.length}</span></div>
         ${list.map((r) => html`
-        <label class="pick ${on ? 'avail' : 'unavail'}">
+        <label class="pick ${kind === 'on' ? 'avail' : 'unavail'}">
           <input type="radio" name="rider" value="${r.id}" ${request.rider?.id === r.id ? 'checked' : ''}>
           ${avatar(r.name, 'sm')}
-          <div class="grow"><b>${r.name}</b> ${vehicleBadge(r.vehicle)}<div class="req-sub">${on ? `On shift since ${fmtTime(r.onShiftSince)}` : 'Off shift'} · ${r.openJobs ?? 0} open</div></div>
+          <div class="grow"><b>${r.name}</b> ${vehicleBadge(r.vehicle)} ${ratingBadge(r)}<div class="req-sub">${r.onShift ? `Clocked in ${fmtTime(r.onShiftSince)} · ${lastSeen(r)}` : 'Clocked out'} · ${r.openJobs ?? 0} open</div>
+            <div class="row wrap" style="gap:4px;margin-top:4px">${availBadge(r)}</div></div>
           ${tagBadges(r.tags)}
         </label>`)}` : ''))}
       </div>`,

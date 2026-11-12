@@ -48,7 +48,7 @@ export function wirePhoto(root) {
   };
 }
 
-async function downscale(file) {
+export async function downscale(file) {
   let source;
   try { source = await createImageBitmap(file); } catch { source = await loadImage(file); }
   const w0 = source.width, h0 = source.height;

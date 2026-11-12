@@ -9,6 +9,8 @@ pending ──assign──▶ assigned ──collect (rider)──▶ collected 
 pending / assigned ──cancel──▶ cancelled
 ```
 
+A request has 1–5 pickups (the first on the request row, extras in `pickups`). The rider records a collection per pickup (`records.pickup_seq`); the request stays `assigned` until every pickup is collected, then becomes `collected`. The rider is fixed, and the request can no longer be edited or cancelled, from the first collection.
+
 Each drop-off is `pending`, `delivered` or `failed`. A failed drop-off can be retried. The request becomes `delivered` when every drop-off is delivered.
 
 ## Concurrency

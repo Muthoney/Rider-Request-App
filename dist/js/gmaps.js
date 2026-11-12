@@ -34,7 +34,35 @@ export function loadGoogleMaps() {
   return loading;
 }
 
-const COLORS = { pickup: '#12a150', drop: '#1f2a4d', delivered: '#16a34a', failed: '#dc2626', rider: '#2a78d6', riderOff: '#8e95aa' };
+const COLORS = { pickup: '#12a150', drop: '#1f2a4d', delivered: '#16a34a', failed: '#dc2626', rider: '#2a78d6', riderOff: '#8e95aa', incident: '#dc2626' };
+/** Rider marker colours by availability (live map legend uses the same). */
+export const AVAIL_COLORS = { available: '#16a34a', assigned: '#2a78d6', on_delivery: '#7c3aed', on_break: '#d97706', offline: '#8e95aa', unresponsive: '#8e95aa' };
+
+// Road routes from the Directions service (needs the Directions API on the browser key). Cached per
+// stop list; on any failure the route is drawn as a dashed straight line instead.
+const roadCache = new Map();
+let directionsBroken = false;
+async function roadPath(points) {
+  if (directionsBroken || points.length < 2 || points.length > 25) return null;
+  const key = points.map((p) => `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`).join('|');
+  if (roadCache.has(key)) return roadCache.get(key);
+  try {
+    const { DirectionsService } = await google.maps.importLibrary('routes');
+    const res = await new DirectionsService().route({
+      origin: points[0], destination: points.at(-1), waypoints: points.slice(1, -1).map((p) => ({ location: p, stopover: true })),
+      travelMode: 'DRIVING', region: 'KE',
+    });
+    const path = res.routes?.[0]?.overview_path?.map((ll) => ({ lat: ll.lat(), lng: ll.lng() })) || null;
+    const legs = res.routes?.[0]?.legs || [];
+    const out = path && { path, minutes: Math.round(legs.reduce((s, l) => s + (l.duration?.value || 0), 0) / 60), km: Math.round(legs.reduce((s, l) => s + (l.distance?.value || 0), 0) / 100) / 10 };
+    roadCache.set(key, out);
+    if (roadCache.size > 100) roadCache.delete(roadCache.keys().next().value);
+    return out;
+  } catch (err) {
+    if (/REQUEST_DENIED|not authorized|ApiNotActivated/i.test(String(err?.message || err?.code))) directionsBroken = true;
+    return null;
+  }
+}
 
 function pinElement(m) {
   const el = document.createElement('div');
@@ -64,6 +92,8 @@ export async function createGoogleMap(el, { zoom = 12, onMarkerClick } = {}) {
   const info = new InfoWindow();
   const markers = new Map();
   let path = null, route = null;
+  const routes = new Map();
+  let routeSeq = 0;
   let fitted = false;
 
   function makeMarker(m) {
@@ -83,7 +113,7 @@ export async function createGoogleMap(el, { zoom = 12, onMarkerClick } = {}) {
       });
     }
     const click = () => {
-      if (onMarkerClick) return onMarkerClick(m.id);
+      if (onMarkerClick && onMarkerClick(m.id) !== false) return; // false: show the info window instead
       if (m.title) { info.setContent(m.title); info.open({ map, anchor: mk }); }
     };
     mk.addListener('click', click);
@@ -109,12 +139,40 @@ export async function createGoogleMap(el, { zoom = 12, onMarkerClick } = {}) {
       if (path) path.setMap(null);
       path = coords.length > 1 ? new Polyline({ map, path: coords, strokeColor: COLORS.rider, strokeOpacity: 0.85, strokeWeight: 4 }) : null;
     },
-    setRoute(coords) {
-      if (route) route.setMap(null);
-      route = coords.length > 1 ? new Polyline({
+    /** Draws the route through `coords` along roads when possible. Resolves to { minutes, km } for road routes. */
+    async setRoute(coords, { color = COLORS.pickup } = {}) {
+      const dashed = () => new Polyline({
         map, path: coords, strokeOpacity: 0,
-        icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.9, strokeColor: COLORS.pickup, scale: 3 }, offset: '0', repeat: '14px' }],
-      }) : null;
+        icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.9, strokeColor: color, scale: 3 }, offset: '0', repeat: '14px' }],
+      });
+      if (route) route.setMap(null);
+      route = coords.length > 1 ? dashed() : null;
+      if (coords.length < 2) return null;
+      const mine = ++routeSeq;
+      const road = await roadPath(coords);
+      if (!road || mine !== routeSeq || !route) return null;
+      route.setMap(null);
+      route = new Polyline({ map, path: road.path, strokeColor: color, strokeOpacity: 0.8, strokeWeight: 5 });
+      return { minutes: road.minutes, km: road.km };
+    },
+    /** Several routes at once (live map): [{ id, coords, color }]. */
+    async setRoutes(list) {
+      const keep = new Set(list.map((r) => r.id));
+      for (const [id, line] of routes) if (!keep.has(id)) { line.setMap(null); routes.delete(id); }
+      for (const r of list) {
+        if (r.coords.length < 2) continue;
+        const sig = JSON.stringify(r.coords) + r.color;
+        const cur = routes.get(r.id);
+        if (cur?.sig === sig) continue;
+        cur?.setMap(null);
+        const line = new Polyline({ map, path: r.coords, strokeColor: r.color, strokeOpacity: 0.55, strokeWeight: 3, icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 2 }, offset: '0', repeat: '12px' }] });
+        line.sig = sig;
+        routes.set(r.id, line);
+        roadPath(r.coords).then((road) => {
+          if (!road || routes.get(r.id) !== line) return;
+          line.setOptions({ path: road.path, strokeOpacity: 0.75, strokeWeight: 4, icons: [] });
+        });
+      }
     },
     fit() {
       const pts = [...markers.values()].map((e) => e.data);
@@ -128,7 +186,7 @@ export async function createGoogleMap(el, { zoom = 12, onMarkerClick } = {}) {
       const e = markers.get(id);
       if (e) { map.panTo(e.data); if (map.getZoom() < 14) map.setZoom(15); }
     },
-    destroy() { for (const e of markers.values()) remove(e); markers.clear(); path?.setMap(null); route?.setMap(null); },
+    destroy() { for (const e of markers.values()) remove(e); markers.clear(); path?.setMap(null); route?.setMap(null); for (const l of routes.values()) l.setMap(null); routes.clear(); },
   };
   return ctl;
 }

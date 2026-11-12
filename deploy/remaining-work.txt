@@ -12,7 +12,7 @@ Built, needs keys (see .env.example and OPERATIONS.md):
 Not connected (UI states this wherever relevant):
 [ ] WhatsApp OTP sign-in (request import is still manual paste)
 [ ] Microsoft SSO (Entra ID) sign-in
-[ ] Android background tracking: browser GPS pauses when the app is in the background; a native/PWA wrapper is needed for screen-off tracking
+[x] Android background tracking: done in the v2 Android app (mobile/, foreground location service)
 [ ] GPS-based handover validation (records carry gps_status = "unconnected")
 [ ] Route optimisation (multi-stop ordering)
 [ ] Off-server backup copy + rehearsed restore

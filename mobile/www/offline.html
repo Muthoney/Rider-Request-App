@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Rider Requests — offline</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #f3f4f8; --ink: #0f1424; --muted: #6b7286; --card: #fff; --brand: #12a150; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0a0e19; --ink: #eceef5; --muted: #8e95aa; --card: #121829; } }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, Roboto, sans-serif; padding: 24px; box-sizing: border-box; }
+    .card { background: var(--card); border-radius: 18px; padding: 28px 24px; max-width: 420px; width: 100%; box-shadow: 0 10px 30px -12px rgba(0,0,0,.25); text-align: center; }
+    h1 { font-size: 22px; margin: 12px 0 6px; }
+    p { color: var(--muted); margin: 6px 0; }
+    button, a.btn { display: inline-flex; align-items: center; justify-content: center; min-height: 48px; padding: 0 22px; border-radius: 13px; border: 0; font: 600 16px system-ui, sans-serif; cursor: pointer; text-decoration: none; margin: 6px 4px 0; }
+    button { background: var(--brand); color: #fff; }
+    a.btn { background: #dc2626; color: #fff; }
+    .icon { width: 56px; height: 56px; border-radius: 16px; display: inline-grid; place-items: center; background: #fdecec; color: #dc2626; font-size: 28px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon" aria-hidden="true">⚠</div>
+    <h1>Can't reach the server</h1>
+    <p>Rider Requests needs a connection the first time it opens on this phone, to sign in and download your jobs.</p>
+    <p>Once you have signed in once, the app opens and works without a connection: your jobs, collections, drop-offs and emergency reports are kept on the phone and sync later.</p>
+    <button onclick="location.href = (window.__rrUrl || '/')">Try again</button>
+    <a class="btn" href="tel:999">Emergency: call 999</a>
+  </div>
+  <script src="app-url.js"></script>
+  <script>
+    // Retry automatically when the connection returns.
+    window.addEventListener('online', () => { location.href = window.__rrUrl || '/'; });
+  </script>
+</body>
+</html>

@@ -105,9 +105,8 @@ export const fromLocalInput = (v) => (v ? new Date(v).toISOString() : null);
 export const greeting = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; };
 export const firstName = (n = '') => n.split(' ')[0];
 export const telHref = (p) => `tel:${String(p).replace(/[^\d+]/g, '')}`;
-export const mapsHref = (stop) => stop.lat != null
-  ? `https://www.google.com/maps/search/?api=1&query=${stop.lat},${stop.lng}`
-  : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(stop.address)}`;
+/** Opens turn-by-turn directions to the stop (the Google Maps app on Android). */
+export const mapsHref = (stop) => `https://www.google.com/maps/dir/?api=1&travelmode=driving&destination=${stop.lat != null ? `${stop.lat},${stop.lng}` : encodeURIComponent(stop.address)}`;
 
 // ---------- toasts ----------
 let toastHost;
@@ -191,7 +190,7 @@ export function empty(iconName, title, text, action = '') {
 export function routeMini(r, max = 2) {
   const extra = r.dropoffs.length - max;
   return html`<div class="route-mini">
-    <div><i class="p"></i><span class="t">${r.pickup.address}</span></div>
+    <div><i class="p"></i><span class="t">${r.pickup.address}</span>${r.pickups?.length > 1 ? html`<span class="badge b-outline more-p">+${r.pickups.length - 1} pickup${r.pickups.length > 2 ? 's' : ''}</span>` : ''}</div>
     ${r.dropoffs.slice(0, max).map((d) => html`<div><i class="d"></i><span class="t">${d.address}</span>${d.status === 'delivered' ? ic('check', 'sm') : ''}</div>`)}
     ${extra > 0 ? html`<div class="muted" style="padding-left:16px">+ ${extra} more stop${extra > 1 ? 's' : ''}</div>` : ''}
   </div>`;

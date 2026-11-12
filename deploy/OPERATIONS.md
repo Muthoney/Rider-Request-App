@@ -47,6 +47,13 @@ Kenyan pump prices are set by EPRA on the 14th of each month. A dispatcher or ad
 
 Route your HTTPS host to `rider-requests:3000` on the shared Docker network. Pass `X-Forwarded-For`. Validate the complete proxy configuration (for example `nginx -t` or `caddy validate`) before you reload it, and leave unrelated sites, DNS and email records, and databases untouched.
 
+### v2 proxy requirements
+
+- **Live events** (`GET /api/events`) is a long-lived Server-Sent Events stream. Turn off response buffering and allow long reads for it, e.g. nginx: `location /api/events { proxy_pass …; proxy_buffering off; proxy_read_timeout 1h; proxy_http_version 1.1; proxy_set_header Connection ""; }`. The server also sends `X-Accel-Buffering: no` and a heartbeat every 25 s. Caddy needs no change.
+- **Uploads**: incident videos are up to 30 MB and proof uploads up to 10 MB. Set `client_max_body_size 32m;` (nginx) or the equivalent.
+- **HTTPS is mandatory** for riders: phones only allow GPS, the camera, service workers and the Android app over HTTPS.
+- Keep `/sw.js` served with `Cache-Control: no-cache` (the app already sends it) so updates reach phones.
+
 ## First deployment
 
 1. Edit the example accounts in `server/provision.mjs` to real people.

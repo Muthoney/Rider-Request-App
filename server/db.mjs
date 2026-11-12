@@ -202,6 +202,175 @@ CREATE TABLE IF NOT EXISTS password_resets (
   expires_at TEXT NOT NULL,
   used_at TEXT
 );
+-- ---- v2: MVP feedback (availability, incidents, location changes, ratings, overtime, notifications, sync) ----
+-- Operational settings per company (standby timeout, job limit, shift length, notification options).
+CREATE TABLE IF NOT EXISTS ops_settings (
+  company_id INTEGER PRIMARY KEY REFERENCES companies(id),
+  max_active_jobs INTEGER NOT NULL DEFAULT 2,
+  standby_timeout_min INTEGER NOT NULL DEFAULT 15,
+  break_max_min INTEGER NOT NULL DEFAULT 60,
+  shift_hours REAL NOT NULL DEFAULT 8,
+  overtime_max_hours REAL NOT NULL DEFAULT 4,
+  sms_recipients INTEGER NOT NULL DEFAULT 0,
+  sms_fallback_seconds INTEGER NOT NULL DEFAULT 90,
+  dispatch_phone TEXT,
+  updated_by INTEGER,
+  updated_at TEXT
+);
+-- Emergencies and incidents reported by riders (accidents, breakdowns, medical, security, other).
+CREATE TABLE IF NOT EXISTS incidents (
+  id INTEGER PRIMARY KEY,
+  company_id INTEGER NOT NULL REFERENCES companies(id),
+  client_id TEXT,
+  rider_id INTEGER NOT NULL REFERENCES users(id),
+  request_id INTEGER REFERENCES requests(id) ON DELETE SET NULL,
+  type TEXT NOT NULL CHECK (type IN ('accident','breakdown','medical','security','other')),
+  severity TEXT NOT NULL DEFAULT 'high' CHECK (severity IN ('critical','high','normal')),
+  description TEXT,
+  lat REAL, lng REAL, accuracy REAL,
+  occurred_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','acknowledged','resolved')),
+  acknowledged_by INTEGER REFERENCES users(id), acknowledged_at TEXT,
+  resolved_by INTEGER REFERENCES users(id), resolved_at TEXT, resolution TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (rider_id, client_id)
+);
+CREATE TABLE IF NOT EXISTS incident_media (
+  id INTEGER PRIMARY KEY,
+  incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+  company_id INTEGER NOT NULL,
+  client_id TEXT,
+  kind TEXT NOT NULL CHECK (kind IN ('photo','video')),
+  mime TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  data BLOB NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  created_at TEXT NOT NULL,
+  UNIQUE (incident_id, client_id)
+);
+-- Pickup / drop-off address changes after a request was submitted.
+CREATE TABLE IF NOT EXISTS location_changes (
+  id INTEGER PRIMARY KEY,
+  company_id INTEGER NOT NULL,
+  request_id INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+  stop_kind TEXT NOT NULL CHECK (stop_kind IN ('pickup','dropoff')),
+  stop_seq INTEGER NOT NULL,
+  old_value TEXT NOT NULL,
+  new_value TEXT NOT NULL,
+  distance_km REAL,
+  significant INTEGER NOT NULL DEFAULT 1,
+  reason TEXT,
+  changed_by INTEGER NOT NULL REFERENCES users(id),
+  rider_id INTEGER REFERENCES users(id),
+  acknowledged_at TEXT,
+  created_at TEXT NOT NULL
+);
+-- Client ratings of a completed delivery (one per request).
+CREATE TABLE IF NOT EXISTS ratings (
+  id INTEGER PRIMARY KEY,
+  company_id INTEGER NOT NULL,
+  request_id INTEGER NOT NULL UNIQUE REFERENCES requests(id) ON DELETE CASCADE,
+  rider_id INTEGER NOT NULL REFERENCES users(id),
+  rater_id INTEGER NOT NULL REFERENCES users(id),
+  stars INTEGER NOT NULL CHECK (stars BETWEEN 1 AND 5),
+  professionalism INTEGER CHECK (professionalism BETWEEN 1 AND 5),
+  timeliness INTEGER CHECK (timeliness BETWEEN 1 AND 5),
+  communication INTEGER CHECK (communication BETWEEN 1 AND 5),
+  handling INTEGER CHECK (handling BETWEEN 1 AND 5),
+  comment TEXT,
+  created_at TEXT NOT NULL
+);
+-- Overtime requests: a rider asks (or is asked) to work past the standard shift; staff decide.
+CREATE TABLE IF NOT EXISTS overtime (
+  id INTEGER PRIMARY KEY,
+  company_id INTEGER NOT NULL,
+  rider_id INTEGER NOT NULL REFERENCES users(id),
+  shift_started_at TEXT NOT NULL,
+  minutes INTEGER NOT NULL,
+  reason TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+  requested_by INTEGER NOT NULL REFERENCES users(id),
+  decided_by INTEGER REFERENCES users(id),
+  decided_at TEXT,
+  decision_note TEXT,
+  created_at TEXT NOT NULL
+);
+-- Calls and other contact made from a delivery (communication history; numbers are not stored).
+CREATE TABLE IF NOT EXISTS contact_log (
+  id INTEGER PRIMARY KEY,
+  company_id INTEGER NOT NULL,
+  request_id INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  target TEXT NOT NULL,
+  channel TEXT NOT NULL CHECK (channel IN ('call','sms','whatsapp')),
+  created_at TEXT NOT NULL
+);
+-- In-app notifications (the "push" channel). Unseen critical items fall back to SMS.
+CREATE TABLE IF NOT EXISTS inbox (
+  id INTEGER PRIMARY KEY,
+  company_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  event TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  link TEXT,
+  request_id INTEGER,
+  incident_id INTEGER,
+  critical INTEGER NOT NULL DEFAULT 0,
+  sms_text TEXT,
+  dedupe_key TEXT UNIQUE,
+  seen_at TEXT,
+  sms_queued_at TEXT,
+  created_at TEXT NOT NULL
+);
+-- SMS outbox (Africa's Talking): queued, retried with backoff, de-duplicated, delivery-tracked.
+CREATE TABLE IF NOT EXISTS sms_outbox (
+  id INTEGER PRIMARY KEY,
+  company_id INTEGER NOT NULL,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  request_id INTEGER,
+  incident_id INTEGER,
+  event TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  text TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','sending','sent','delivered','failed','skipped')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT NOT NULL,
+  provider_id TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+-- Offline sync: responses to mutating calls sent with an Idempotency-Key, so replays never duplicate.
+CREATE TABLE IF NOT EXISTS idempotency (
+  user_id INTEGER NOT NULL,
+  key TEXT NOT NULL,
+  method TEXT NOT NULL,
+  path TEXT NOT NULL,
+  status INTEGER NOT NULL,
+  response TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, key)
+);
+-- Android push tokens (Firebase Cloud Messaging), registered by the mobile app.
+CREATE TABLE IF NOT EXISTS push_tokens (
+  token TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL DEFAULT 'android',
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_company ON incidents(company_id, status, id DESC);
+CREATE INDEX IF NOT EXISTS idx_incident_media ON incident_media(incident_id);
+CREATE INDEX IF NOT EXISTS idx_locchanges_request ON location_changes(request_id, id);
+CREATE INDEX IF NOT EXISTS idx_ratings_rider ON ratings(rider_id);
+CREATE INDEX IF NOT EXISTS idx_overtime_rider ON overtime(rider_id, shift_started_at);
+CREATE INDEX IF NOT EXISTS idx_inbox_user ON inbox(user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_inbox_unseen ON inbox(critical, seen_at, sms_queued_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_due ON sms_outbox(status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_outbox_provider ON sms_outbox(provider_id);
+CREATE INDEX IF NOT EXISTS idx_contact_request ON contact_log(request_id);
 CREATE INDEX IF NOT EXISTS idx_requests_company ON requests(company_id, status);
 CREATE INDEX IF NOT EXISTS idx_attachments_request ON attachments(request_id);
 CREATE INDEX IF NOT EXISTS idx_resets_user ON password_resets(user_id);
@@ -234,6 +403,24 @@ function migrate(db) {
   add('company_settings', 'electricity_price', 'REAL');
   add('company_settings', 'km_per_kwh', 'REAL');
   add('company_settings', 'default_vehicle', 'TEXT');
+  // v2 — rider availability: a break the rider takes, and when the rider's app was last heard from.
+  add('users', 'break_since', 'TEXT');
+  add('users', 'last_seen_at', 'TEXT');
+  // v2 — notification preferences: SMS for 'critical' events (default), 'all' events, or 'off'.
+  add('users', 'sms_pref', "TEXT NOT NULL DEFAULT 'critical'");
+  // v2 — structured location details (building, floor, unit, gate, landmark) as JSON per stop.
+  add('requests', 'pickup_details', 'TEXT');
+  add('pickups', 'details', 'TEXT');
+  add('dropoffs', 'details', 'TEXT');
+  // v2 — GPS captured on the rider's phone when a collection or handover is recorded.
+  add('records', 'lat', 'REAL');
+  add('records', 'lng', 'REAL');
+  add('records', 'accuracy', 'REAL');
+  add('records', 'client_recorded_at', 'TEXT');
+  // v2 — shift log: the standard length that applied, and approved overtime.
+  add('shifts', 'planned_minutes', 'INTEGER');
+  add('shifts', 'overtime_minutes', 'INTEGER');
+  add('shifts', 'approved_overtime_minutes', 'INTEGER');
   // "Keep cold" handling was retired; strip it from stored requests.
   db.exec(`UPDATE requests SET handling = (SELECT json_group_array(value) FROM json_each(requests.handling) WHERE value != 'cold')
     WHERE EXISTS (SELECT 1 FROM json_each(requests.handling) WHERE value = 'cold')`);

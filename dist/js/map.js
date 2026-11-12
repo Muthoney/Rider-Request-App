@@ -58,8 +58,9 @@ export function renderMap(points, { width = 640, height = 300, compact = false, 
   const pins = pts.map((p) => {
     const x = X(p.lng), y = Y(p.lat);
     if (p.kind === 'rider') {
-      return `<g><title>${esc(p.address || 'Rider')} (GPS)</title><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="16" fill="var(--series-1)" opacity=".18"/>
-        <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="9" fill="var(--series-1)" stroke="#fff" stroke-width="3"/></g>`;
+      const c = /^#[0-9a-f]{3,8}$/i.test(p.color || '') ? p.color : 'var(--series-1)';
+      return `<g><title>${esc(p.address || 'Rider')} (GPS)</title><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="16" fill="${c}" opacity=".18"/>
+        <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="9" fill="${c}" stroke="#fff" stroke-width="3"/></g>`;
     }
     const name = compact ? '' : `<text class="map-pin-name" x="${(x + 16).toFixed(1)}" y="${(y - 14).toFixed(1)}">${esc((p.address || '').split(',')[0].slice(0, 26))}${p.approx ? ' ≈' : ''}</text>`;
     return `<g><title>${esc(p.address || '')}${p.approx ? ` (approximate: ${esc(p.placeName)})` : ''}</title>
@@ -76,7 +77,9 @@ export function renderMap(points, { width = 640, height = 300, compact = false, 
 
 export function requestPoints(r) {
   return [
-    { label: 'P', kind: 'pickup', address: r.pickup.address, lat: r.pickup.lat, lng: r.pickup.lng },
+    ...(r.pickups || [{ ...r.pickup, seq: 1 }]).map((p, i, all) => ({
+      label: all.length > 1 ? `P${i + 1}` : 'P', kind: 'pickup', address: p.address, lat: p.lat, lng: p.lng, status: p.collected ? 'delivered' : undefined,
+    })),
     ...r.dropoffs.map((d, i) => ({ label: String(i + 1), kind: 'drop', address: d.address, lat: d.lat, lng: d.lng, status: d.status })),
   ];
 }
@@ -99,7 +102,10 @@ export async function mountRouteMap(host, points, { height = 300, width = 400, r
         }));
         if (live.rider) markers.push({ id: 'rider', kind: 'rider', label: '🏍', lat: live.rider.lat, lng: live.rider.lng, title: esc(`${live.rider.name} · GPS ${new Date(live.rider.recordedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`) });
         ctl.setMarkers(markers);
-        ctl.setRoute(placed.filter((p) => p.kind !== 'rider'));
+        // While the rider is live, route from the rider through the stops still to do (navigation view).
+        const todo = placed.filter((p) => p.kind !== 'rider' && p.status !== 'delivered');
+        ctl.setRoute(live.rider && todo.length ? [{ lat: live.rider.lat, lng: live.rider.lng }, ...todo] : placed.filter((p) => p.kind !== 'rider'),
+          live.rider ? { color: '#2a78d6' } : undefined);
         ctl.setPath(live.path || []);
         const tag = host.querySelector('[data-tag]');
         tag.innerHTML = `${icon(live.rider ? 'gps' : 'pin', 'sm')} ${live.rider ? 'Rider live on GPS' : 'Google Maps · Kenya'}${placed.some((p) => p.approx) ? ' · ≈ from landmark/street' : ''}`;

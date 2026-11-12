@@ -5,7 +5,8 @@ import {
   html, ic, statusBadge, categoryBadge, urgentBadge, avatar, timeAgo, fmtDateTime, fmtTime, tagBadges, HANDLING, toast,
   canWrite, readOnlyChip, isScheduledLater, scheduleBadge, vehicleBadge, confirmDialog,
 } from '../ui.js';
-import { assign, pickRiderDialog } from './actions.js';
+import { assign, pickRiderDialog, availBadge, ratingBadge, lastSeen } from './actions.js';
+import { openModal } from '../ui.js';
 
 const TABS = [
   ['waiting', 'Waiting', 'clock'],
@@ -18,10 +19,10 @@ export async function render(el, ctx) {
   let filter = 'all';
   let tab = 'waiting';
   try { tab = localStorage.getItem('rr-dispatch-tab') || 'waiting'; } catch {}
-  let requests, riders;
+  let requests, riders, summary = null, openIncidents = 0;
   const load = async () => {
     const [a, b] = await Promise.all([api.get('/api/requests?status=open'), api.get('/api/stats')]);
-    requests = a.requests; riders = b.riders;
+    requests = a.requests; riders = b.riders; summary = b.availability; openIncidents = b.openIncidents || 0;
   };
   await load();
 
@@ -36,7 +37,7 @@ export async function render(el, ctx) {
       <div class="t-top"><span class="mono muted" style="font-size:12px">${r.ref}</span>${urgentBadge(r.priority)}${categoryBadge(r.category)}<span class="grow"></span>${r.status !== 'pending' ? statusBadge(r.status) : ''}</div>
       <a class="t-title" href="#/requests/${r.id}">${r.title}</a>
       <div class="route-mini" style="font-size:12.5px">
-        <div><i class="p"></i><span class="t">${r.pickup.address}</span></div>
+        <div><i class="p"></i><span class="t">${r.pickup.address}${r.pickups?.length > 1 ? ` (+${r.pickups.length - 1} pickup${r.pickups.length > 2 ? 's' : ''})` : ''}</span></div>
         <div><i class="d"></i><span class="t">${r.dropoffs[0].address}${r.dropoffs.length > 1 ? ` (+${r.dropoffs.length - 1})` : ''}</span></div>
       </div>
       <div class="row between" style="gap:6px">
@@ -56,10 +57,10 @@ export async function render(el, ctx) {
         <span class="av-wrap ${on ? 'on' : ''}">${avatar(rd.name)}</span>
         <div class="grow">
           <b>${rd.name} ${vehicleBadge(rd.vehicle)}</b>
-          <small>${on ? html`<span class="onshift"></span>On shift since ${fmtTime(rd.onShiftSince)}` : html`<span class="offshift"></span>Off shift`} · ${rd.openJobs} open${on ? ` · ${rd.doneToday} done today` : ''}</small>
+          <small>${on ? html`<span class="onshift"></span>In ${fmtTime(rd.onShiftSince)} · ${lastSeen(rd)}` : html`<span class="offshift"></span>Clocked out`} · ${rd.openJobs} open${on ? ` · ${rd.doneToday} done today` : ''}</small>
+          <div class="row wrap" style="gap:4px;margin-top:4px">${availBadge(rd)}${ratingBadge(rd)}${tagBadges(rd.tags)}</div>
           ${on ? html`<div class="load" title="${rd.openJobs} open job${rd.openJobs === 1 ? '' : 's'}"><i style="width:${Math.min(100, rd.openJobs * 25)}%"></i></div>` : ''}
         </div>
-        <div class="row" style="gap:4px">${tagBadges(rd.tags)}</div>
       </div>
       <div class="lane-body">${jobs.length ? jobs.map(ticket)
         : html`<div class="drop-hint">${ic(on ? 'bike' : 'power')}<p>${writer ? (on ? 'Ready for work: drop a request here' : 'Off shift. Drop here to assign anyway') : on ? 'No open jobs' : 'Off shift'}</p></div>`}</div>
@@ -70,7 +71,8 @@ export async function render(el, ctx) {
     const waiting = requests.filter((r) => r.status === 'pending' && match(r));
     const dueNow = waiting.filter((r) => !isScheduledLater(r));
     const later = waiting.filter(isScheduledLater).sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt));
-    const avail = riders.filter((rd) => rd.onShift).sort((a, b) => a.openJobs - b.openJobs || a.name.localeCompare(b.name));
+    const RANK = { available: 0, assigned: 1, on_delivery: 2, on_break: 3 };
+    const avail = riders.filter((rd) => rd.onShift).sort((a, b) => (a.unresponsive - b.unresponsive) || (RANK[a.availability] ?? 1) - (RANK[b.availability] ?? 1) || a.openJobs - b.openJobs || a.name.localeCompare(b.name));
     const unavail = riders.filter((rd) => !rd.onShift);
     const counts = { waiting: waiting.length, available: avail.length, unavailable: unavail.length };
     el.innerHTML = String(html`
@@ -83,9 +85,19 @@ export async function render(el, ctx) {
           <div class="seg" role="group" aria-label="Filter requests">
             ${[['all', 'All'], ['urgent', 'Urgent'], ['triangle', 'Triangle'], ['finance', 'Finance'], ['general', 'General']].map(([k, l]) => html`<button data-f="${k}" class="${filter === k ? 'on' : ''}">${l}</button>`)}
           </div>
+          ${writer ? html`<button class="btn" id="announce">${ic('megaphone', 'sm')}<span>Announce</span></button>` : ''}
           <button class="icon-btn" id="refresh" aria-label="Refresh" title="Refresh">${ic('refresh')}</button>
         </div>
       </div>
+      ${summary ? html`<div class="avail-strip" aria-label="Rider availability">
+        <span class="as s-delivered"><b>${summary.readyNow}</b>Ready now</span>
+        <span class="as s-assigned"><b>${summary.assigned}</b>Assigned</span>
+        <span class="as s-collected"><b>${summary.on_delivery}</b>On delivery</span>
+        <span class="as s-pending"><b>${summary.on_break}</b>On break</span>
+        <span class="as"><b>${summary.offline}</b>Offline</span>
+        ${summary.unresponsive ? html`<span class="as s-failed"><b>${summary.unresponsive}</b>Not responding</span>` : ''}
+        ${openIncidents ? html`<a class="as s-failed" href="#/incidents"><b>${openIncidents}</b>Open incident${openIncidents > 1 ? 's' : ''}</a>` : ''}
+      </div>` : ''}
       <div class="dispatch-tabs" role="tablist" aria-label="Board sections">
         ${TABS.map(([k, label, icon]) => html`<button role="tab" class="dt-${k} ${tab === k ? 'on' : ''}" aria-selected="${tab === k}" data-tab="${k}">
           ${ic(icon, 'sm')}<span>${label}</span><b>${counts[k]}</b></button>`)}
@@ -105,7 +117,7 @@ export async function render(el, ctx) {
           <section class="zone zone-available" aria-label="Available riders">
             <header class="zone-head">
               <span class="zi">${ic('power', 'sm')}</span>
-              <div class="grow"><h2>Available riders</h2><small>${avail.length} of ${riders.length} on shift · least busy first</small></div>
+              <div class="grow"><h2>Riders on shift</h2><small>${avail.length} of ${riders.length} clocked in · ready riders first</small></div>
               ${avail.length ? html`<span class="live-pill"><i></i>On shift</span>` : ''}
             </header>
             ${avail.length ? html`<div class="rider-grid">${avail.map((rd) => riderLane(rd, true))}</div>`
@@ -114,7 +126,7 @@ export async function render(el, ctx) {
           <section class="zone zone-unavailable" aria-label="Unavailable riders">
             <header class="zone-head">
               <span class="zi">${ic('bike', 'sm')}</span>
-              <div class="grow"><h2>Unavailable riders</h2><small>${unavail.length} off shift</small></div>
+              <div class="grow"><h2>Offline riders</h2><small>${unavail.length} clocked out</small></div>
             </header>
             ${unavail.length ? html`<div class="rider-grid compact">${unavail.map((rd) => riderLane(rd, false))}</div>`
               : html`<div class="zone-empty">${ic('checkCircle')}<p>Every rider is on shift.</p></div>`}
@@ -130,7 +142,7 @@ export async function render(el, ctx) {
     if ((r.rider?.id ?? null) === riderId) return;
     const rd = riders.find((x) => x.id === riderId);
     if (rd && !rd.onShift && !(await confirmDialog({
-      title: `${rd.name} is off shift`, message: `Assign ${r.ref} anyway? They'll be notified, but they aren't working right now.`, confirm: 'Assign anyway', iconName: 'power',
+      title: `${rd.name} is clocked out`, message: `Assign ${r.ref} anyway? They'll be notified, but they aren't working right now.`, confirm: 'Assign anyway', iconName: 'power',
     }))) return;
     const res = await assign(r, riderId);
     if (res) { await load(); paint(); ctx.refreshBadges(); }
@@ -146,6 +158,18 @@ export async function render(el, ctx) {
       el.querySelectorAll('.dispatch-tabs button').forEach((x) => { const on = x.dataset.tab === tab; x.classList.toggle('on', on); x.setAttribute('aria-selected', on); });
     }));
     el.querySelector('#refresh').addEventListener('click', async () => { await load(); paint(); toast('Board refreshed'); });
+    el.querySelector('#announce')?.addEventListener('click', async () => {
+      const data = await openModal({
+        title: 'Send an announcement', subtitle: 'Shown in the app straight away. Mark it important to also send it by SMS to anyone who does not see it.', iconName: 'megaphone',
+        body: html`<div class="field"><label for="an-t">Message</label><textarea class="input" id="an-t" name="text" maxlength="300" rows="3" required placeholder="e.g. Heavy traffic on Mombasa Road — use Lang'ata Road" autofocus></textarea></div>
+          <div class="field"><label for="an-a">Send to</label><select class="input" id="an-a" name="audience"><option value="on_shift">Riders on shift</option><option value="riders">All riders</option><option value="everyone">Everyone in the company</option></select></div>
+          <label class="switch"><input type="checkbox" name="important"> Important (SMS if not seen)</label>`,
+        actions: html`<button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">${ic('send', 'sm')} Send</button>`,
+        onMount: ({ form, close }) => form.addEventListener('submit', (e) => { e.preventDefault(); if (form.text.value.trim()) close({ text: form.text.value.trim(), audience: form.audience.value, important: form.important.checked }); }),
+      });
+      if (!data) return;
+      try { const r = await api.post('/api/announcements', data); toast(`Sent to ${r.sent} ${r.sent === 1 ? 'person' : 'people'}.`); } catch (err) { toast(err.message, 'err'); }
+    });
     if (!writer) return;
     el.querySelectorAll('[data-pick]').forEach((b) => b.addEventListener('click', async (e) => {
       e.preventDefault();
@@ -172,8 +196,10 @@ export async function render(el, ctx) {
     });
   }
   paint();
-  ctx.poll(async () => {
+  const refresh = async () => {
     if (document.querySelector('.modal-back') || el.querySelector('.dragging')) return;
     try { await load(); paint(); } catch {}
-  }, 15000);
+  };
+  ctx.onLive(refresh, ['change', 'riders', 'incident', 'shifts']);
+  ctx.poll(refresh, 20000);
 }

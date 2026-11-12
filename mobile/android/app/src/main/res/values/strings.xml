@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Rider Requests</string>
+    <string name="title_activity_main">Rider Requests</string>
+    <string name="package_name">ke.co.lookmedia.riders</string>
+    <string name="custom_url_scheme">ke.co.lookmedia.riders</string>
+</resources>

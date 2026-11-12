@@ -29,7 +29,7 @@ export async function render(el, ctx) {
     if (!['open', 'all', 'scheduled'].includes(status) && r.status !== status) return false;
     if (category !== 'all' && r.category !== category) return false;
     if (q) {
-      const hay = `${r.ref} ${r.title} ${r.pickup.address} ${r.requester.name} ${r.rider?.name || ''} ${r.dropoffs.map((d) => `${d.address} ${d.contactName || ''}`).join(' ')}`.toLowerCase();
+      const hay = `${r.ref} ${r.title} ${(r.pickups || [r.pickup]).map((p) => p.address).join(' ')} ${r.requester.name} ${r.rider?.name || ''} ${r.dropoffs.map((d) => `${d.address} ${d.contactName || ''}`).join(' ')}`.toLowerCase();
       if (!q.toLowerCase().split(/\s+/).every((w) => hay.includes(w))) return false;
     }
     return true;
@@ -46,7 +46,7 @@ export async function render(el, ctx) {
         { header: 'Category', width: 11, value: (r) => CATEGORY[r.category]?.label },
         { header: 'Priority', width: 9, value: (r) => (r.priority === 'urgent' ? 'Urgent' : 'Normal') },
         { header: 'Scheduled pickup', width: 18, value: (r) => (r.scheduledAt ? new Date(r.scheduledAt) : 'ASAP') },
-        { header: 'Pickup', width: 34, value: (r) => r.pickup.address },
+        { header: 'Pickups', width: 40, value: (r) => (r.pickups || [r.pickup]).map((p, i) => `${i + 1}. ${p.address}`).join('\n') },
         { header: 'Drop-offs', width: 50, value: (r) => r.dropoffs.map((d) => `${d.seq}. ${d.address}`).join('\n') },
         { header: 'Requester', width: 20, value: (r) => r.requester.name },
         { header: 'Rider', width: 20, value: (r) => r.rider?.name },
@@ -70,7 +70,7 @@ export async function render(el, ctx) {
           </td>
           <td>${statusBadge(r.status)}</td>
           <td class="hide-sm" style="max-width:280px">
-            <div class="req-sub" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${ic('pin', 'sm')}${r.pickup.address.split(',')[0]} → ${r.dropoffs[0]?.address.split(',')[0]}${r.dropoffs.length > 1 ? ` +${r.dropoffs.length - 1}` : ''}</div>
+            <div class="req-sub" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${ic('pin', 'sm')}${r.pickup.address.split(',')[0]}${r.pickups?.length > 1 ? ` +${r.pickups.length - 1}` : ''} → ${r.dropoffs[0]?.address.split(',')[0]}${r.dropoffs.length > 1 ? ` +${r.dropoffs.length - 1}` : ''}</div>
           </td>
           ${staff ? html`<td class="hide-sm"><span class="row" style="gap:8px">${avatar(r.requester.name, 'sm')}<span>${r.requester.name}</span></span></td>` : ''}
           <td>${r.rider ? html`<span class="row" style="gap:8px">${avatar(r.rider.name, 'sm')}<span class="nowrap">${r.rider.name}</span></span>` : html`<span class="muted">—</span>`}</td>
@@ -82,7 +82,7 @@ export async function render(el, ctx) {
       <div class="row between"><span class="mono muted">${r.ref}</span>${statusBadge(r.status)}</div>
       <div><b style="font-size:15px">${r.title}</b><div class="row wrap" style="gap:6px;margin-top:6px">${urgentBadge(r.priority)}${categoryBadge(r.category)}${scheduleBadge(r)}</div></div>
       <div class="route-mini">
-        <div><i class="p"></i><span class="t">${r.pickup.address}</span></div>
+        ${(r.pickups || [r.pickup]).map((p) => html`<div><i class="p"></i><span class="t">${p.address}</span>${p.collected ? ic('check', 'sm') : ''}</div>`)}
         ${r.dropoffs.map((d) => html`<div><i class="d"></i><span class="t">${d.address}</span>${d.status === 'delivered' ? ic('check', 'sm') : ''}</div>`)}
       </div>
       <div class="row between" style="border-top:1px solid var(--line);padding-top:10px">

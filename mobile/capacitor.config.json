@@ -1,0 +1,25 @@
+{
+  "appId": "ke.co.lookmedia.riders",
+  "appName": "Rider Requests",
+  "webDir": "www",
+  "server": {
+    "url": "https://ride-request.lookmedia.co.ke",
+    "cleartext": false,
+    "errorPath": "offline.html",
+    "allowNavigation": [
+      "ride-request.lookmedia.co.ke"
+    ]
+  },
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": false,
+    "appendUserAgent": "RiderRequestsAndroid/2.0"
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_rider",
+      "iconColor": "#12a150"
+    }
+  }
+}

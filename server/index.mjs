@@ -27,6 +27,7 @@ const integrations = createIntegrations(process.env);
 const handler = createApp({
   integrations,
   db, origin: APP_ORIGIN, cookieSecure: COOKIE_SECURE, trustProxy: TRUST_PROXY, distDir: path.join(root, 'dist'),
+  startWorkers: true, // SMS outbox, SMS fallback sweep, shift/standby checks
   log: (level, msg) => (level === 'error' ? console.error(msg) : process.env.LOG_REQUESTS === '1' && console.log(msg)),
   // Local development only (loopback origin, non-Secure cookies): when no email, WhatsApp or SMS
   // provider is configured, print password-reset links here so recovery can be tried end to end.
@@ -40,9 +41,9 @@ server.listen(PORT, HOST, () => {
   console.log(`Rider Requests listening on ${HOST}:${PORT} (origin ${APP_ORIGIN})`);
   const on = (b) => (b ? 'on' : 'off');
   console.log(`Integrations: Google Maps ${on(integrations.maps.browserKey)}, geocoding/routes ${on(integrations.geocode.configured)}, ` +
-    `WhatsApp ${on(integrations.whatsapp.configured)}, SMS ${on(integrations.sms.configured)}, email ${on(integrations.email.configured)}`);
+    `WhatsApp ${on(integrations.whatsapp.configured)}, SMS ${on(integrations.sms.configured)}, email ${on(integrations.email.configured)}, push ${on(integrations.push.configured)}`);
 });
 
-const shutdown = () => server.close(async () => { await handler.idle(); db.close(); process.exit(0); });
+const shutdown = () => { handler.close(); server.close(async () => { await handler.idle(); db.close(); process.exit(0); }); };
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);

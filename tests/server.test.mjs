@@ -269,12 +269,11 @@ describe('delivery progress', () => {
     const rider = await as('rider.gen@alpha.test');
     const early = await rider.post(`/api/requests/${r.id}/dropoffs/${cur.dropoffs[0].id}/handover`, { version: cur.version, receivedBy: 'Mercy' });
     assert.equal(early.status, 409);
-    const noPhoto = await rider.post(`/api/requests/${r.id}/collect`, { version: cur.version, collectedFrom: 'Reception', itemCount: 2 });
-    assert.equal(noPhoto.status, 400, 'a collection needs a photo');
     const fake = await rider.post(`/api/requests/${r.id}/collect`, { version: cur.version, collectedFrom: 'Reception', photo: 'data:image/png;base64,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' });
     assert.equal(fake.status, 400, 'bytes must really be an image');
-    const col = await rider.post(`/api/requests/${r.id}/collect`, { version: cur.version, collectedFrom: 'Reception', itemCount: 2, photo: PNG });
-    assert.equal(col.status, 200);
+    // MVP feedback: the pickup photo is optional (the drop-off photo stays required, below).
+    const col = await rider.post(`/api/requests/${r.id}/collect`, { version: cur.version, collectedFrom: 'Reception', itemCount: 2 });
+    assert.equal(col.status, 200, 'a collection no longer needs a photo');
     cur = col.data.request;
     assert.equal(cur.status, 'collected');
 
@@ -288,6 +287,8 @@ describe('delivery progress', () => {
     assert.equal(cur.status, 'collected');
     const unsigned = await rider.post(`/api/requests/${r.id}/dropoffs/${cur.dropoffs[0].id}/handover`, { version: cur.version, receivedBy: 'Mercy', photo: PNG });
     assert.equal(unsigned.status, 400, 'a delivered handover needs the D-note signature');
+    const noDropPhoto = await rider.post(`/api/requests/${r.id}/dropoffs/${cur.dropoffs[0].id}/handover`, { version: cur.version, receivedBy: 'Mercy', signature: PNG });
+    assert.equal(noDropPhoto.status, 400, 'a delivered handover still needs a photo');
     const h1 = await rider.post(`/api/requests/${r.id}/dropoffs/${cur.dropoffs[0].id}/handover`, { version: cur.version, receivedBy: 'Mercy', dnoteRef: 'DN-1001', ...proof() });
     cur = h1.data.request;
     assert.equal(h1.data.remaining, 1);
@@ -299,6 +300,7 @@ describe('delivery progress', () => {
     const detail = await d.get(`/api/requests/${r.id}`);
     assert.equal(detail.data.records.length, 4);
     assert.ok(detail.data.records.every((x) => x.gpsStatus === 'unconnected'));
+    assert.equal(detail.data.records.find((x) => x.kind === 'collection').photo, null, 'no pickup photo was taken');
     const signed = detail.data.records.find((x) => x.dnoteRef === 'DN-1001');
     assert.equal(signed.signedBy, 'Mercy');
     assert.ok(signed.photo && signed.signature);

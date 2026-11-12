@@ -120,14 +120,49 @@ export function createIntegrations(env = process.env, { fetchImpl = globalThis.f
       const host = atUser === 'sandbox' ? 'https://api.sandbox.africastalking.com' : 'https://api.africastalking.com';
       const form = new URLSearchParams({ username: atUser, to, message: text });
       if (env.AT_SENDER_ID) form.set('from', env.AT_SENDER_ID);
-      const { ok, data } = await fetchJson(fetchImpl, `${host}/version1/messaging`, {
-        method: 'POST', headers: { apiKey: atKey, Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, body: form,
-      });
+      let res;
+      try {
+        res = await fetchJson(fetchImpl, `${host}/version1/messaging`, {
+          method: 'POST', headers: { apiKey: atKey, Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' }, body: form,
+        });
+      } catch (err) {
+        throw Object.assign(new Error(`SMS gateway unreachable: ${err.message}`), { permanent: false });
+      }
+      const { ok, status, data } = res;
       const r = data?.SMSMessageData?.Recipients?.[0];
       if (!ok || !r || ![100, 101, 102].includes(Number(r.statusCode))) {
-        throw new Error(r?.status || data?.SMSMessageData?.Message || 'SMS provider did not accept the message');
+        const code = Number(r?.statusCode);
+        // Africa's Talking: 401 RiskHold, 402 InvalidSenderId, 403 InvalidPhoneNumber, 404 UnsupportedNumberType,
+        // 406 UserInBlacklist, 409 DoNotDisturb are final; 405 InsufficientBalance, 407 CouldNotRoute and 5xx are retried.
+        const permanent = [401, 402, 403, 404, 406, 409].includes(code) || status === 401 || (status >= 400 && status < 500 && status !== 429 && !r);
+        throw Object.assign(new Error(r?.status || data?.SMSMessageData?.Message || data?.raw || `SMS provider did not accept the message (HTTP ${status})`), { permanent, code });
       }
       return { id: r.messageId };
+    },
+  };
+
+  // ---------- Firebase Cloud Messaging (Android push, optional) ----------
+  // FCM_SERVICE_ACCOUNT: the service-account JSON (inline, or base64 of it). Without it the app relies
+  // on the live event stream while open, and on SMS fallback when it is not.
+  let fcmAccount = null;
+  try {
+    const raw = env.FCM_SERVICE_ACCOUNT || '';
+    if (raw) fcmAccount = JSON.parse(raw.trim().startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8'));
+  } catch { fcmAccount = null; }
+  let fcmToken = null;
+  const push = {
+    configured: !!(fcmAccount?.client_email && fcmAccount?.private_key && fcmAccount?.project_id),
+    async send({ token, title, body, data = {} }) {
+      if (!fcmToken || fcmToken.exp < Date.now() + 60e3) fcmToken = await googleAccessToken(fetchImpl, fcmAccount, 'https://www.googleapis.com/auth/firebase.messaging');
+      const { ok, data: out } = await fetchJson(fetchImpl, `https://fcm.googleapis.com/v1/projects/${fcmAccount.project_id}/messages:send`, {
+        method: 'POST', headers: { Authorization: `Bearer ${fcmToken.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: { token, notification: { title, body }, data, android: { priority: 'high', notification: { channel_id: 'dispatch' } } } }),
+      });
+      if (!ok) {
+        const code = out?.error?.details?.find?.((d) => d.errorCode)?.errorCode || out?.error?.status;
+        throw Object.assign(new Error(out?.error?.message || 'FCM rejected the message'), { unregistered: code === 'UNREGISTERED' || code === 'NOT_FOUND' });
+      }
+      return { id: out?.name };
     },
   };
 
@@ -145,8 +180,25 @@ export function createIntegrations(env = process.env, { fetchImpl = globalThis.f
 
   return {
     maps: { browserKey: mapsBrowserKey, mapId: env.GOOGLE_MAPS_MAP_ID || '' },
-    geocode, routes, whatsapp, sms, email,
+    geocode, routes, whatsapp, sms, email, push,
+    /** Shared secret Africa's Talking must send (?token=…) on delivery-report callbacks. */
+    smsCallbackToken: env.AT_CALLBACK_TOKEN || '',
   };
+}
+
+/** OAuth2 access token for a Google service account (JWT bearer grant, RS256). */
+async function googleAccessToken(fetchImpl, account, scope) {
+  const { createSign } = await import('node:crypto');
+  const b64u = (o) => Buffer.from(typeof o === 'string' ? o : JSON.stringify(o)).toString('base64url');
+  const iat = Math.floor(Date.now() / 1000);
+  const unsigned = `${b64u({ alg: 'RS256', typ: 'JWT' })}.${b64u({ iss: account.client_email, scope, aud: 'https://oauth2.googleapis.com/token', iat, exp: iat + 3600 })}`;
+  const sig = createSign('RSA-SHA256').update(unsigned).sign(account.private_key).toString('base64url');
+  const { ok, data } = await fetchJson(fetchImpl, 'https://oauth2.googleapis.com/token', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: `${unsigned}.${sig}` }),
+  });
+  if (!ok || !data?.access_token) throw new Error(`Google token request failed: ${data?.error_description || data?.error || 'no token'}`);
+  return { token: data.access_token, exp: Date.now() + (data.expires_in || 3600) * 1000 };
 }
 
 // ---------- minimal SMTP client (STARTTLS or implicit TLS, AUTH PLAIN/LOGIN) ----------

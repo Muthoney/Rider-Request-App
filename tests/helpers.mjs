@@ -9,7 +9,11 @@ export const ORIGIN = 'https://riders.test';
 export const PASSWORD = 'correct-horse-battery-1';
 const dist = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), 'dist');
 
-export async function startServer({ now, integrations } = {}) {
+/**
+ * `maxActiveJobs`: the per-rider active-job limit for test companies. Older tests stack several jobs on one
+ * rider (runs), so the limit defaults high; tests of the limit itself pass a small value.
+ */
+export async function startServer({ now, integrations, maxActiveJobs = 20 } = {}) {
   const db = openDb(':memory:');
   const clock = { offset: 0 };
   const handler = createApp({ db, origin: ORIGIN, cookieSecure: true, distDir: dist, now: now || (() => Date.now() + clock.offset), integrations });
@@ -19,7 +23,9 @@ export async function startServer({ now, integrations } = {}) {
   const ids = {};
   const company = (name) => {
     db.prepare('INSERT OR IGNORE INTO companies (name, created_at) VALUES (?, ?)').run(name, new Date().toISOString());
-    return db.prepare('SELECT id FROM companies WHERE name = ?').get(name).id;
+    const id = db.prepare('SELECT id FROM companies WHERE name = ?').get(name).id;
+    db.prepare('INSERT OR IGNORE INTO ops_settings (company_id, max_active_jobs) VALUES (?, ?)').run(id, maxActiveJobs);
+    return id;
   };
   const user = (email, role, { companyName = 'Alpha', tags = [], mustChange = false, password = PASSWORD, tempExpiresAt = null, phone = null } = {}) => {
     const r = db.prepare(`INSERT INTO users (company_id, email, name, phone, role, tags, password_hash, must_change, temp_expires_at, created_at)
@@ -28,7 +34,10 @@ export async function startServer({ now, integrations } = {}) {
     ids[email] = Number(r.lastInsertRowid);
     return ids[email];
   };
-  return { db, base, ids, user, clock, idle: () => handler.idle(), close: () => new Promise((r) => server.close(r)) };
+  return {
+    db, base, ids, user, clock, handler, idle: () => handler.idle(), tick: () => handler.tick(),
+    close: () => { handler.close(); server.closeAllConnections?.(); return new Promise((r) => server.close(r)); },
+  };
 }
 
 /** A tiny cookie-keeping client that behaves like the browser adapter. */

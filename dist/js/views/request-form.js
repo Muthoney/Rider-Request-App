@@ -4,6 +4,7 @@ import { parseWhatsApp, parsePin } from '../whatsapp.js';
 import { renderMap, placePoints } from '../map.js';
 import { isInKenya } from '../kenya.js';
 import { quote, routeKm, estimateMinutes, kes } from '../fuel.js';
+import { detailsFields, readDetails, detailLists, detailsText } from '../stops.js';
 
 const SAMPLE = `[07/11/2026, 09:14] Joy (Studio): Hi dispatch 👋
 Item: Campaign proofs for Triangle sign-off
@@ -16,8 +17,10 @@ Drop 2: Print House, Enterprise Rd, Industrial Area
 Contact: Print desk 0711 000 203
 Note: fragile – keep upright, signature needed`;
 
-const blankStop = () => ({ address: '', contactName: '', contactPhone: '', lat: null, lng: null, instructions: '' });
+const blankStop = () => ({ address: '', contactName: '', contactPhone: '', lat: null, lng: null, instructions: '', details: null });
 const MAX_DAYS = 180;
+const MAX_EXTRA_PICKUPS = 4;
+const blankPickup = () => ({ address: '', contactName: '', contactPhone: '', lat: null, lng: null, details: null });
 const dayStr = (d) => toLocalInput(d.toISOString()).slice(0, 10);
 /** Quick schedule presets (local time). */
 function presets() {
@@ -37,15 +40,22 @@ export async function render(el, ctx) {
   }
   const state = existing ? {
     title: existing.title, category: existing.category, priority: existing.priority, scheduledAt: existing.scheduledAt,
-    pickup: { ...existing.pickup }, dropoffs: existing.dropoffs.map((d) => ({ ...d })), handling: [...existing.handling],
+    pickup: { ...existing.pickup }, extraPickups: (existing.pickups || []).slice(1).map((p) => ({ ...p })),
+    dropoffs: existing.dropoffs.map((d) => ({ ...d })), handling: [...existing.handling],
     handlingNotes: existing.handlingNotes || '', notes: existing.notes || '', source: existing.source, version: existing.version,
   } : {
-    title: '', category: 'general', priority: 'normal', scheduledAt: null, pickup: blankStop(), dropoffs: [blankStop()],
+    title: '', category: 'general', priority: 'normal', scheduledAt: null, pickup: blankStop(), extraPickups: [], dropoffs: [blankStop()],
     handling: [], handlingNotes: '', notes: '', source: 'form',
   };
+  // Smart defaults: recent places, and the requester as the pickup contact.
+  let recent = { pickups: [], dropoffs: [] };
   if (!existing) {
     state.pickup.address = '';
+    recent = await api.get('/api/places/recent').catch(() => recent);
+    if (ctx.user.role === 'requester') { state.pickup.contactName = ctx.user.name; state.pickup.contactPhone = ctx.user.phone || ''; }
   }
+  const recentAll = [...recent.pickups, ...recent.dropoffs];
+  const fromRecent = (addr) => recentAll.find((x) => x.address.toLowerCase() === String(addr).trim().toLowerCase());
   let fuelSettings = null;
   api.get('/api/fuel/settings').then((r) => { fuelSettings = r.settings; refreshSummary(); }).catch(() => {});
   let schedule = !!state.scheduledAt;
@@ -59,16 +69,18 @@ export async function render(el, ctx) {
   const showImport = ctx.query.get('import') === '1';
 
   const PIN_HINT = 'Kenya only. Without a pin, the map uses the landmark or street named in the address.';
-  const pinField = (prefix, stop, i) => html`
-    <div class="field">
-      <label for="${prefix}-pin">Map pin <span class="muted" style="font-weight:500">(optional)</span></label>
+  /** Address with "Find on map", a pin status line and (folded away) a pin/link paste box. */
+  const addressField = (prefix, stop, i, label, placeholder) => html`
+    <div class="field full"><label for="${prefix}-address">${label}</label>
       <div class="row" style="gap:8px">
-        <div class="input-icon grow">${ic('pin', 'sm')}<input class="input" id="${prefix}-pin" data-pin="${i}" placeholder="Paste a Google Maps link or “-1.28, 36.82”"
-          value="${stop.lat != null ? `${stop.lat}, ${stop.lng}` : ''}"></div>
-        <button type="button" class="btn" data-find="${i}" title="Find the address in Kenya">${ic('search', 'sm')} Find in Kenya</button>
+        <input class="input grow" id="${prefix}-address" data-k="address" ${i === 'p' ? html`name="p_address"` : ''} value="${stop.address}" placeholder="${placeholder}" required list="rr-recent" autocomplete="off">
+        <button type="button" class="btn" data-find="${i}" title="Find this address on the map (Kenya)">${ic('search', 'sm')}<span class="hide-xs">Find</span></button>
       </div>
       <div class="place-results" data-results="${i}" hidden></div>
-      <span class="hint" data-pin-status="${i}">${stop.lat != null ? html`<span class="coord-ok">${ic('check', 'sm')} Pin placed</span>` : PIN_HINT}</span>
+      <span class="hint" data-pin-status="${i}">${stop.lat != null ? html`<span class="coord-ok">${ic('check', 'sm')} On the map</span>` : html`Tap <b>Find</b> to place it on the map, or <button type="button" class="link-btn" data-show-pin="${i}">paste a map pin</button>.`}</span>
+      <div class="pin-box" data-pin-box="${i}" ${stop.lat != null ? '' : 'hidden'}>
+        <div class="input-icon">${ic('pin', 'sm')}<input class="input" id="${prefix}-pin" data-pin="${i}" placeholder="Paste a Google Maps link or “-1.28, 36.82”" value="${stop.lat != null ? `${stop.lat}, ${stop.lng}` : ''}" aria-label="Map pin"></div>
+      </div>
     </div>`;
 
   const dropoffHtml = (d, i, n) => html`
@@ -80,12 +92,28 @@ export async function render(el, ctx) {
         <button type="button" class="icon-btn" data-remove="${i}" aria-label="Remove drop-off ${i + 1}" ${n === 1 ? 'disabled' : ''}>${ic('trash', 'sm')}</button>
       </div>
       <div class="form-grid">
-        <div class="field full"><label for="d${i}-address">Address</label>
-          <input class="input" id="d${i}-address" data-k="address" value="${d.address}" placeholder="Building, street, area" required></div>
-        <div class="field"><label for="d${i}-cn">Recipient</label><input class="input" id="d${i}-cn" data-k="contactName" value="${d.contactName || ''}" placeholder="Name"></div>
-        <div class="field"><label for="d${i}-cp">Phone</label><input class="input" id="d${i}-cp" data-k="contactPhone" type="tel" value="${d.contactPhone || ''}" placeholder="+254 7…"></div>
-        <div class="field full"><label for="d${i}-ins">Instructions for this stop</label><input class="input" id="d${i}-ins" data-k="instructions" value="${d.instructions || ''}" placeholder="e.g. Leave with reception, ask for Mercy"></div>
-        <div class="full">${pinField(`d${i}`, d, i)}</div>
+        ${addressField(`d${i}`, d, i, 'Address', 'e.g. Upper Hill Chambers, 2nd Ngong Ave')}
+        <div class="field"><label for="d${i}-cn">Recipient</label><input class="input" id="d${i}-cn" data-k="contactName" value="${d.contactName || ''}" placeholder="Who receives it" autocomplete="off"></div>
+        <div class="field"><label for="d${i}-cp">Recipient phone</label><input class="input" id="d${i}-cp" data-k="contactPhone" type="tel" inputmode="tel" value="${d.contactPhone || ''}" placeholder="07… or +254 7…"></div>
+        <div class="full">${detailsFields(`d${i}`, d.details, { directions: false })}</div>
+        <details class="more full" ${d.instructions ? 'open' : ''}><summary>${ic('message', 'sm')} Instructions for the rider <span class="muted">(optional)</span></summary>
+          <div class="field" style="margin-top:8px"><input class="input" id="d${i}-ins" data-k="instructions" value="${d.instructions || ''}" placeholder="e.g. Leave with reception, ask for Mercy" aria-label="Instructions for this stop"></div></details>
+      </div>
+    </div>`;
+
+  const stopFor = (key) => (key === 'p' ? state.pickup : key.startsWith('x') ? state.extraPickups[+key.slice(1)] : state.dropoffs[+key]);
+
+  const extraPickupHtml = (p, i) => html`
+    <div class="dropoff-edit pickup-edit" data-xp="${i}">
+      <div class="dh">
+        <span class="num p">P${i + 2}</span><b class="grow">Pickup ${i + 2}</b>
+        <button type="button" class="icon-btn" data-xremove="${i}" aria-label="Remove pickup ${i + 2}">${ic('trash', 'sm')}</button>
+      </div>
+      <div class="form-grid">
+        ${addressField(`x${i}`, p, `x${i}`, 'Address', 'Where else should the rider collect from?')}
+        <div class="field"><label for="x${i}-cn">Contact</label><input class="input" id="x${i}-cn" data-k="contactName" value="${p.contactName || ''}" placeholder="Name"></div>
+        <div class="field"><label for="x${i}-cp">Phone</label><input class="input" id="x${i}-cp" data-k="contactPhone" type="tel" inputmode="tel" value="${p.contactPhone || ''}" placeholder="07…"></div>
+        <div class="full">${detailsFields(`x${i}`, p.details)}</div>
       </div>
     </div>`;
 
@@ -99,25 +127,33 @@ export async function render(el, ctx) {
     state.pickup.address = f.p_address.value;
     state.pickup.contactName = f.p_contactName.value;
     state.pickup.contactPhone = f.p_contactPhone.value;
+    state.pickup.details = readDetails(el.querySelector('[data-pickup-main]'));
     state.handling = [...f.querySelectorAll('input[name=handling]:checked')].map((x) => x.value);
     state.handlingNotes = f.handlingNotes.value;
     state.notes = f.notes.value;
+    el.querySelectorAll('[data-xp]').forEach((box) => {
+      const p = state.extraPickups[+box.dataset.xp];
+      box.querySelectorAll('[data-k]').forEach((inp) => { p[inp.dataset.k] = inp.value; });
+      p.details = readDetails(box);
+    });
     el.querySelectorAll('[data-drop]').forEach((box) => {
       const d = state.dropoffs[+box.dataset.drop];
       box.querySelectorAll('[data-k]').forEach((inp) => { d[inp.dataset.k] = inp.value; });
+      d.details = readDetails(box);
     });
   }
 
   function summary() {
     const pts = [
-      { label: 'P', kind: 'pickup', address: state.pickup.address, lat: state.pickup.lat, lng: state.pickup.lng },
+      { label: state.extraPickups.length ? 'P1' : 'P', kind: 'pickup', address: state.pickup.address, lat: state.pickup.lat, lng: state.pickup.lng },
+      ...state.extraPickups.map((p, i) => ({ label: `P${i + 2}`, kind: 'pickup', address: p.address, lat: p.lat, lng: p.lng })),
       ...state.dropoffs.map((d, i) => ({ label: String(i + 1), kind: 'drop', address: d.address, lat: d.lat, lng: d.lng })),
     ].filter((p) => p.address || p.lat != null);
     const placed = placePoints(pts).filter((p) => !p.unplaced);
     let est = null;
     if (fuelSettings && placed.length >= 2) {
       const km = routeKm(placed, fuelSettings.roadFactor);
-      est = quote({ km, minutes: estimateMinutes(km, state.dropoffs.length + 1) }, fuelSettings);
+      est = quote({ km, minutes: estimateMinutes(km, state.dropoffs.length + 1 + state.extraPickups.length) }, fuelSettings);
     }
     return html`
       <div class="card-head"><h3>Summary</h3>${state.priority === 'urgent' ? html`<span class="badge p-urgent">${ic('flag')}Urgent</span>` : ''}</div>
@@ -126,7 +162,7 @@ export async function render(el, ctx) {
         <dl class="kv" style="grid-template-columns:96px 1fr">
           <dt>Category</dt><dd>${CATEGORY[state.category].label}</dd>
           <dt>Pickup</dt><dd>${schedule && state.scheduledAt ? html`<span class="badge s-scheduled">${ic('calendar')}Scheduled</span> ${new Date(state.scheduledAt).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} <span class="muted">(${timeAgo(state.scheduledAt)})</span>` : schedule ? html`<span class="muted">Choose a date and time</span>` : 'As soon as possible'}</dd>
-          <dt>Stops</dt><dd>1 pickup · ${state.dropoffs.length} drop-off${state.dropoffs.length > 1 ? 's' : ''}</dd>
+          <dt>Stops</dt><dd>${state.extraPickups.length + 1} pickup${state.extraPickups.length ? 's' : ''} · ${state.dropoffs.length} drop-off${state.dropoffs.length > 1 ? 's' : ''}</dd>
           <dt>Handling</dt><dd>${state.handling.length ? state.handling.map((h) => HANDLING[h].label).join(', ') : 'Standard'}</dd>
           <dt>Quote</dt><dd>${est ? html`<b>${kes(est.total)}</b> <span class="muted">≈ ${est.km} km · ${est.minutes} min · ${est.energy} ${est.unit} ${est.vehicle === 'electric' ? 'electricity' : 'fuel'}</span>` : html`<span class="muted">Add Kenyan addresses or pins to estimate</span>`}</dd>
         </dl>
@@ -159,28 +195,19 @@ export async function render(el, ctx) {
     <div class="grid g-main-wide">
       <form id="rf" class="stack" novalidate>
         <div class="alert err" id="form-err" hidden role="alert"></div>
+        ${detailLists()}
+        <datalist id="rr-recent">${recentAll.map((x) => html`<option value="${x.address}"></option>`)}</datalist>
         <section class="card">
-          <div class="card-head"><span class="section-title"><span class="si">${ic('package', 'sm')}</span><h2>What's being delivered</h2></span></div>
+          <div class="card-head"><span class="section-title"><span class="si">${ic('package', 'sm')}</span><div><h2>What &amp; when</h2><p>Only the description is required here</p></div></span></div>
           <div class="card-body stack">
-            <div class="field"><label for="title">Description</label>
+            <div class="field"><label for="title">What is being delivered?</label>
               <input class="input" id="title" name="title" maxlength="120" required value="${state.title}" placeholder="e.g. Signed contracts for client review"></div>
-            <div class="field"><span class="label">Category</span>
-              <div class="choice-cards" role="radiogroup" aria-label="Category">${Object.entries(CATEGORY).map(([k, c]) => html`
-                <label class="choice"><input type="radio" name="category" value="${k}" ${state.category === k ? 'checked' : ''}>
-                  <b>${ic(c.icon, 'sm')}${c.label}</b><small>${c.desc}</small></label>`)}</div>
-            </div>
-            <label class="switch"><input type="checkbox" name="urgent" ${state.priority === 'urgent' ? 'checked' : ''}> ${ic('flag', 'sm')} Urgent</label>
-          </div>
-        </section>
-
-        <section class="card" id="when-card">
-          <div class="card-head"><span class="section-title"><span class="si">${ic('calendar', 'sm')}</span><div><h2>When</h2><p>Send a rider now, or schedule the pickup for a future date</p></div></span></div>
-          <div class="card-body stack">
-            <div class="choice-cards two" role="radiogroup" aria-label="Pickup time">
-              <label class="choice"><input type="radio" name="when" value="now" ${!schedule ? 'checked' : ''}>
-                <b>${ic('clock', 'sm')}As soon as possible</b><small>The next available rider is assigned.</small></label>
-              <label class="choice"><input type="radio" name="when" value="later" ${schedule ? 'checked' : ''}>
-                <b>${ic('calendarPlus', 'sm')}Schedule for later</b><small>Choose a date and time, up to ${MAX_DAYS} days ahead.</small></label>
+            <div class="row wrap" style="gap:10px;align-items:center">
+              <div class="seg fill" role="radiogroup" aria-label="Pickup time">
+                <label><input type="radio" name="when" value="now" ${!schedule ? 'checked' : ''}>${ic('clock', 'sm')}As soon as possible</label>
+                <label><input type="radio" name="when" value="later" ${schedule ? 'checked' : ''}>${ic('calendarPlus', 'sm')}Schedule</label>
+              </div>
+              <label class="switch"><input type="checkbox" name="urgent" ${state.priority === 'urgent' ? 'checked' : ''}> ${ic('flag', 'sm')} Urgent</label>
             </div>
             <div class="schedule-box stack-sm" data-schedule ${schedule ? '' : 'hidden'}>
               <div class="form-grid">
@@ -191,20 +218,28 @@ export async function render(el, ctx) {
               </div>
               <div class="chips" role="group" aria-label="Quick picks">${presets().map(([label, d]) => html`
                 <button type="button" class="chip" data-preset="${d.toISOString()}">${ic('clock', 'sm')}${label}</button>`)}</div>
-              <span class="hint" id="s-hint">The request shows as <b>Scheduled</b>. Dispatch assigns a rider before the pickup time, and the rider is notified.</span>
+              <span class="hint" id="s-hint">Up to ${MAX_DAYS} days ahead. Dispatch assigns a rider before the pickup time, and the rider is notified.</span>
             </div>
+            <div class="field"><span class="label">Type of work</span>
+              <div class="seg fill" role="radiogroup" aria-label="Category">${Object.entries(CATEGORY).map(([k, c]) => html`
+                <label title="${c.desc}"><input type="radio" name="category" value="${k}" ${state.category === k ? 'checked' : ''}>${ic(c.icon, 'sm')}${c.label}</label>`)}</div>
+              <span class="hint" data-cat-hint>${CATEGORY[state.category].desc}</span></div>
           </div>
         </section>
 
         <section class="card">
-          <div class="card-head"><span class="section-title"><span class="si">${ic('pin', 'sm')}</span><h2>Pickup</h2></span></div>
-          <div class="card-body form-grid">
-            <div class="field full"><label for="p_address">Pickup address</label>
-              <input class="input" id="p_address" name="p_address" required value="${state.pickup.address}" placeholder="Where should the rider collect from?"></div>
+          <div class="card-head"><span class="section-title"><span class="si">${ic('pin', 'sm')}</span><h2>${state.extraPickups.length ? 'Pickups' : 'Pickup'}</h2></span>
+            <span class="muted">${state.extraPickups.length + 1} of ${MAX_EXTRA_PICKUPS + 1}</span></div>
+          <div class="card-body form-grid" data-pickup-main>
+            ${!editing && recent.pickups.length ? html`<div class="full chips recent" aria-label="Recent pickups"><span class="muted" style="font-size:12.5px">Recent:</span>${recent.pickups.slice(0, 4).map((x, n) => html`
+              <button type="button" class="chip" data-recent-p="${n}">${ic('clock', 'sm')}${x.address.split(',')[0]}</button>`)}</div>` : ''}
+            ${addressField('p', state.pickup, 'p', 'Pickup address', 'Where should the rider collect from?')}
             <div class="field"><label for="p_cn">Contact at pickup</label><input class="input" id="p_cn" name="p_contactName" value="${state.pickup.contactName || ''}" placeholder="Name"></div>
-            <div class="field"><label for="p_cp">Phone</label><input class="input" id="p_cp" name="p_contactPhone" type="tel" value="${state.pickup.contactPhone || ''}" placeholder="+254 7…"></div>
-            <div class="full">${pinField('p', state.pickup, 'p')}</div>
+            <div class="field"><label for="p_cp">Phone</label><input class="input" id="p_cp" name="p_contactPhone" type="tel" inputmode="tel" value="${state.pickup.contactPhone || ''}" placeholder="07…"></div>
+            <div class="full">${detailsFields('p', state.pickup.details)}</div>
           </div>
+          ${state.extraPickups.length ? html`<div class="card-body stack" style="padding-top:0">${state.extraPickups.map(extraPickupHtml)}</div>` : ''}
+          <div class="card-body" style="padding-top:0"><button type="button" class="link-btn" id="add-pickup" ${state.extraPickups.length >= MAX_EXTRA_PICKUPS ? 'disabled' : ''}>${ic('plus', 'sm')} Collect from another place too</button></div>
         </section>
 
         <section class="card">
@@ -219,13 +254,15 @@ export async function render(el, ctx) {
         </section>
 
         <section class="card">
-          <div class="card-head"><span class="section-title"><span class="si">${ic('hand', 'sm')}</span><h2>Item handling</h2></span></div>
-          <div class="card-body stack">
-            <div class="chips">${Object.entries(HANDLING).map(([k, h]) => html`
-              <label class="chip"><input type="checkbox" name="handling" value="${k}" ${state.handling.includes(k) ? 'checked' : ''}>${ic(h.icon, 'sm')}${h.label}</label>`)}</div>
-            <div class="field"><label for="hn">Handling notes</label><textarea class="input" id="hn" name="handlingNotes" maxlength="1000" placeholder="Anything the rider must know about the items">${state.handlingNotes}</textarea></div>
-            <div class="field"><label for="notes">Notes for dispatch</label><textarea class="input" id="notes" name="notes" maxlength="2000" placeholder="Deadlines, cost centre, context…">${state.notes}</textarea></div>
-          </div>
+          <details class="more card-more" ${state.handling.length || state.handlingNotes || state.notes ? 'open' : ''}>
+            <summary class="card-head"><span class="section-title"><span class="si">${ic('hand', 'sm')}</span><div><h2>Handling &amp; notes</h2><p>${state.handling.length ? state.handling.map((h) => HANDLING[h].label).join(', ') : 'Optional: fragile, confidential, cash, signature needed…'}</p></div></span>${ic('chevronDown', 'sm')}</summary>
+            <div class="card-body stack">
+              <div class="chips">${Object.entries(HANDLING).map(([k, h]) => html`
+                <label class="chip"><input type="checkbox" name="handling" value="${k}" ${state.handling.includes(k) ? 'checked' : ''}>${ic(h.icon, 'sm')}${h.label}</label>`)}</div>
+              <div class="field"><label for="hn">Handling notes</label><textarea class="input" id="hn" name="handlingNotes" maxlength="1000" placeholder="Anything the rider must know about the items">${state.handlingNotes}</textarea></div>
+              <div class="field"><label for="notes">Notes for dispatch</label><textarea class="input" id="notes" name="notes" maxlength="2000" placeholder="Deadlines, cost centre, context…">${state.notes}</textarea></div>
+            </div>
+          </details>
           <div class="card-foot row between">
             <a class="btn ghost" href="${editing ? `#/requests/${existing.id}` : '#/requests'}">Cancel</a>
             <button class="btn primary lg" type="submit" data-busy=" Saving…">${ic('check', 'sm')} ${editing ? 'Save changes' : 'Submit request'}</button>
@@ -278,7 +315,7 @@ export async function render(el, ctx) {
     }));
     el.querySelectorAll('[data-pin]').forEach((inp) => inp.addEventListener('change', () => {
       const key = inp.dataset.pin;
-      const stop = key === 'p' ? state.pickup : state.dropoffs[+key];
+      const stop = stopFor(key);
       const status = el.querySelector(`[data-pin-status="${key}"]`);
       const v = inp.value.trim();
       if (!v) { stop.lat = stop.lng = null; status.textContent = PIN_HINT; refreshSummary(); return; }
@@ -296,6 +333,41 @@ export async function render(el, ctx) {
       refreshSummary();
     }));
     el.querySelectorAll('[data-find]').forEach((b) => b.addEventListener('click', () => findPlace(b.dataset.find, b)));
+    el.querySelectorAll('[data-show-pin]').forEach((b) => b.addEventListener('click', () => {
+      const box = el.querySelector(`[data-pin-box="${b.dataset.showPin}"]`);
+      box.hidden = false; box.querySelector('input').focus();
+    }));
+    el.querySelectorAll('[data-recent-p]').forEach((b) => b.addEventListener('click', () => {
+      readDom();
+      const x = recent.pickups[+b.dataset.recentP];
+      state.pickup = { ...state.pickup, ...Object.fromEntries(Object.entries(x).filter(([, v]) => v != null && v !== '')) };
+      paint();
+      toast(`Pickup set to ${x.address.split(',')[0]}`);
+    }));
+    f.addEventListener('change', (e) => {
+      if (e.target.name === 'category') el.querySelector('[data-cat-hint]').textContent = CATEGORY[e.target.value].desc;
+      // Picking a recent address fills its pin, details and contact (only where still empty).
+      if (e.target.dataset.k === 'address' || e.target.name === 'p_address') {
+        const hit = fromRecent(e.target.value);
+        if (!hit) return;
+        readDom();
+        const box = e.target.closest('[data-drop],[data-xp]');
+        const stop = box ? (box.dataset.drop != null ? state.dropoffs[+box.dataset.drop] : state.extraPickups[+box.dataset.xp]) : state.pickup;
+        for (const [k, v] of Object.entries(hit)) if (v != null && v !== '' && (stop[k] == null || stop[k] === '')) stop[k] = v;
+        paint();
+      }
+      if (e.target.dataset.det) {
+        const sum = e.target.closest('[data-details]')?.querySelector('[data-det-sum]');
+        if (sum) sum.textContent = detailsText(readDetails(e.target.closest('[data-details]'))) || '(optional, helps the rider find the exact spot)';
+      }
+    });
+    el.querySelector('#add-pickup').addEventListener('click', () => {
+      readDom(); state.extraPickups.push(blankPickup()); paint();
+      el.querySelector(`#x${state.extraPickups.length - 1}-address`)?.focus();
+    });
+    el.querySelectorAll('[data-xremove]').forEach((b) => b.addEventListener('click', () => {
+      readDom(); state.extraPickups.splice(+b.dataset.xremove, 1); paint();
+    }));
     el.querySelector('#add-drop').addEventListener('click', () => {
       readDom(); state.dropoffs.push(blankStop()); paint();
       el.querySelector(`#d${state.dropoffs.length - 1}-address`)?.focus();
@@ -326,7 +398,7 @@ export async function render(el, ctx) {
 
   async function findPlace(key, btn) {
     readDom();
-    const stop = key === 'p' ? state.pickup : state.dropoffs[+key];
+    const stop = stopFor(key);
     const box = el.querySelector(`[data-results="${key}"]`);
     const q = stop.address.trim();
     if (q.length < 2) { toast('Type the address first, e.g. “Yaya Centre, Argwings Kodhek Rd”.', 'warn'); return; }
@@ -342,7 +414,8 @@ export async function render(el, ctx) {
           const r = results[+x.dataset.n];
           stop.lat = r.lat; stop.lng = r.lng;
           el.querySelector(`[data-pin="${key}"]`).value = `${r.lat.toFixed(6)}, ${r.lng.toFixed(6)}`;
-          el.querySelector(`[data-pin-status="${key}"]`).innerHTML = String(html`<span class="coord-ok">${ic('check', 'sm')} Pinned to ${r.address}${r.approximate ? ' (approximate)' : ''}</span>`);
+          el.querySelector(`[data-pin-box="${key}"]`).hidden = false;
+          el.querySelector(`[data-pin-status="${key}"]`).innerHTML = String(html`<span class="coord-ok">${ic('check', 'sm')} On the map: ${r.address}${r.approximate ? ' (approximate)' : ''}</span>`);
           box.hidden = true;
           refreshSummary();
         }));
@@ -380,11 +453,12 @@ export async function render(el, ctx) {
     const missing = [];
     if (!state.title.trim()) missing.push(f.title);
     if (!state.pickup.address.trim()) missing.push(f.p_address);
+    state.extraPickups.forEach((p, i) => { if (!p.address.trim()) missing.push(el.querySelector(`#x${i}-address`)); });
     state.dropoffs.forEach((d, i) => { if (!d.address.trim()) missing.push(el.querySelector(`#d${i}-address`)); });
     if (schedule && !state.scheduledAt) missing.push(f.sDate.value ? f.sTime : f.sDate);
     if (missing.length) {
       missing.forEach((x) => x.setAttribute('aria-invalid', 'true'));
-      errBox.innerHTML = String(html`${ic('alert', 'sm')}<span>Fill in the highlighted fields: a description, the pickup address, every drop-off address${schedule ? ', and the pickup date and time' : ''}.</span>`);
+      errBox.innerHTML = String(html`${ic('alert', 'sm')}<span>Fill in the highlighted fields: what is being delivered, the pickup address and every drop-off address${schedule ? ', and the pickup date and time' : ''}.</span>`);
       errBox.hidden = false; missing[0].focus();
       return;
     }
@@ -396,7 +470,9 @@ export async function render(el, ctx) {
     }
     const payload = {
       title: state.title, category: state.category, priority: state.priority, scheduledAt: state.scheduledAt,
-      pickup: state.pickup, dropoffs: state.dropoffs.map(({ address, contactName, contactPhone, lat, lng, instructions }) => ({ address, contactName, contactPhone, lat, lng, instructions })),
+      pickup: (({ address, contactName, contactPhone, lat, lng, details }) => ({ address, contactName, contactPhone, lat, lng, details }))(state.pickup),
+      extraPickups: state.extraPickups.map(({ address, contactName, contactPhone, lat, lng, details }) => ({ address, contactName, contactPhone, lat, lng, details })),
+      dropoffs: state.dropoffs.map(({ address, contactName, contactPhone, lat, lng, instructions, details }) => ({ address, contactName, contactPhone, lat, lng, instructions, details })),
       handling: state.handling, handlingNotes: state.handlingNotes, notes: state.notes, source: state.source,
     };
     await busy(f.querySelector('[type=submit]'), async () => {
