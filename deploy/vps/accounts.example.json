@@ -1,0 +1,11 @@
+{
+  "company": "Look Media",
+  "accounts": [
+    { "email": "admin@example.com", "name": "Admin Name", "role": "admin", "phone": "+254700000001" },
+    { "email": "dispatch@example.com", "name": "Dispatcher Name", "role": "dispatcher", "phone": "+254700000002" },
+    { "email": "manager@example.com", "name": "Manager Name", "role": "manager", "phone": "+254700000003" },
+    { "email": "requester@example.com", "name": "Requester Name", "role": "requester", "phone": "+254700000004" },
+    { "email": "rider1@example.com", "name": "Rider Name", "role": "rider", "phone": "+254700000011", "tags": ["triangle"] },
+    { "email": "rider2@example.com", "name": "Rider Name", "role": "rider", "phone": "+254700000012", "tags": ["finance"], "vehicle": "electric" }
+  ]
+}

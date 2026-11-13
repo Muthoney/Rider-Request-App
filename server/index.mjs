@@ -36,7 +36,9 @@ const handler = createApp({
 
 const server = http.createServer(handler);
 server.headersTimeout = 15_000;
-server.requestTimeout = 30_000;
+// Long enough for a 30 MB incident video over a slow mobile connection; headersTimeout still stops
+// slow-header attacks.
+server.requestTimeout = 5 * 60_000;
 server.listen(PORT, HOST, () => {
   console.log(`Rider Requests listening on ${HOST}:${PORT} (origin ${APP_ORIGIN})`);
   const on = (b) => (b ? 'on' : 'off');

@@ -1,0 +1,24 @@
+# Caddy obtains and renews the HTTPS certificate automatically once DNS points at the server.
+# Caddy ignores X-Forwarded-For sent by clients and sets it to the real client IP, which the app
+# reads with TRUST_PROXY=1.
+{$DOMAIN} {
+	# Incident videos are up to 30 MB, proofs up to 10 MB.
+	request_body {
+		max_size 32MB
+	}
+
+	# Compress everything except the live event stream (SSE must not be buffered).
+	@compress not path /api/events
+	encode @compress zstd gzip
+
+	reverse_proxy app:3000 {
+		flush_interval -1
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
+
+# Plain www/http variants are redirected by Caddy automatically.

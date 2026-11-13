@@ -95,7 +95,9 @@ npm test
 
 ## Deploy
 
-Copy `.env.example` to a private `.env` and set `APP_ORIGIN` to the exact HTTPS origin. Adapt `deploy/compose.example.yml` (it expects an external network `rider-requests-edge` shared with your reverse proxy) and keep the `rider-requests-data` and `rider-requests-backups` volumes across redeployments. Read [deploy/OPERATIONS.md](deploy/OPERATIONS.md) first. **No automatic deployment is configured in this repository.**
+Copy `.env.example` to a private `.env` and set `APP_ORIGIN` to the exact HTTPS origin. Adapt `deploy/compose.example.yml` (it expects an external network `rider-requests-edge` shared with your reverse proxy) and keep the `rider-requests-data` and `rider-requests-backups` volumes across redeployments. Read [deploy/OPERATIONS.md](deploy/OPERATIONS.md) first.
+
+**Production (Hostinger VPS):** follow [deploy/vps/README.md](deploy/vps/README.md). `deploy/vps/server-setup.sh` prepares a fresh Ubuntu server once, and `deploy/vps/deploy.sh` deploys the last commit with a backup, health check and automatic rollback.
 
 ## Backups
 

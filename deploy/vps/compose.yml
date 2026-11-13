@@ -1,0 +1,51 @@
+# Production stack for a single VPS: the app plus Caddy (automatic HTTPS via Let's Encrypt).
+# Lives at /opt/rider-requests/compose.yml on the server; deploy/vps/deploy.sh copies it there.
+# /opt/rider-requests/.env (written by deploy.sh) holds DOMAIN and APP_TAG; app.env holds the app's secrets.
+name: rider-requests
+
+services:
+  app:
+    image: rider-requests:${APP_TAG:?APP_TAG is set by deploy.sh}
+    container_name: rider-requests
+    restart: unless-stopped
+    env_file: app.env
+    environment:
+      APP_ORIGIN: https://${DOMAIN:?DOMAIN must be set in .env}
+      COOKIE_SECURE: "true"
+      TRUST_PROXY: "1"
+    volumes:
+      - data:/data
+      - ./backups:/backups          # bind mount so backups are easy to copy off the server
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  caddy:
+    image: caddy:2.10-alpine
+    container_name: rider-requests-caddy
+    restart: unless-stopped
+    depends_on: [app]
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+volumes:
+  data:
+    name: rider-requests-data       # the SQLite database: never delete this volume
+  caddy-data:
+    name: rider-requests-caddy-data # TLS certificates
+  caddy-config:
+    name: rider-requests-caddy-config

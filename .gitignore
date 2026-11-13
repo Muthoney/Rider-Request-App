@@ -6,3 +6,6 @@ node_modules/
 bootstrap-credentials.json
 data/
 backups/
+deploy/vps/target.env
+accounts.json
+deploy/vps/accounts.json

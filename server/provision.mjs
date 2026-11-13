@@ -2,7 +2,7 @@
 // temporary passwords to a private file in the data volume. Existing accounts are never reset.
 //   node server/provision.mjs            accounts only
 //   node server/provision.mjs --sample   also add sample requests, a shift log, riders on shift with demo GPS, and a run
-import { writeFileSync, chmodSync } from 'node:fs';
+import { writeFileSync, chmodSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { openDb, tx } from './db.mjs';
 import { hashPassword, tempPassword } from './security.mjs';
@@ -11,11 +11,27 @@ import { TEMP_TTL_MS } from './app.mjs';
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const DB_FILE = process.env.DB_FILE || path.join(DATA_DIR, 'rider-requests.sqlite');
 const OUT = process.env.CREDENTIALS_FILE || path.join(DATA_DIR, 'bootstrap-credentials.json');
-const sample = process.argv.includes('--sample');
+const sample = process.argv.includes('--sample') && !process.argv.includes('--accounts');
 
-// Change these definitions before provisioning a real deployment.
-const COMPANY = 'Example Media Ltd';
-const ACCOUNTS = [
+// Real deployments: pass a private JSON file instead of editing these examples
+//   node server/provision.mjs --accounts accounts.json      (or "--accounts -" to read it from stdin)
+// Format: see deploy/vps/accounts.example.json.
+const accountsArg = process.argv.indexOf('--accounts');
+const custom = accountsArg > 0 ? JSON.parse(readFileSync(process.argv[accountsArg + 1] === '-' ? 0 : process.argv[accountsArg + 1], 'utf8')) : null;
+if (custom && (!custom.company || !Array.isArray(custom.accounts) || !custom.accounts.length)) {
+  console.error('Accounts file needs a "company" name and a non-empty "accounts" list.');
+  process.exit(1);
+}
+const ROLES = ['admin', 'manager', 'dispatcher', 'requester', 'rider'];
+for (const a of custom?.accounts || []) {
+  if (!a.email || !a.name || !ROLES.includes(a.role)) {
+    console.error(`Invalid account ${JSON.stringify(a)}: needs email, name and a role (${ROLES.join(', ')}).`);
+    process.exit(1);
+  }
+  a.email = String(a.email).trim().toLowerCase();
+}
+const COMPANY = custom ? custom.company : 'Example Media Ltd';
+const ACCOUNTS = custom ? custom.accounts : [
   { email: 'admin@example.com', name: 'Amina Wanjiku', role: 'admin', phone: '+254700000001' },
   { email: 'manager@example.com', name: 'Brian Otieno', role: 'manager', phone: '+254700000002' },
   { email: 'dispatch@example.com', name: 'Cynthia Mwangi', role: 'dispatcher', phone: '+254700000003' },
